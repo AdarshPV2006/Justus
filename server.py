@@ -30,11 +30,8 @@ logger = logging.getLogger(__name__)
 # ===============================
 
 class Config:
-    # Server settings
     HOST = "0.0.0.0"
     PORT = int(os.environ.get("PORT", 8080))
-    WS_PORT = PORT
-    API_PORT = PORT
     
     # Security
     JWT_SECRET = os.environ.get("JWT_SECRET", "your-super-secret-jwt-key-change-this-in-production")
@@ -476,102 +473,7 @@ class MessageProcessor:
             except Exception as e:
                 logger.error(f"Error sending undelivered message: {e}")
 
-# ===============================
-# WEB SERVER (HTTP API)
-# ===============================
 
-class HTTPServer:
-    def __init__(self, auth_manager: AuthManager, db: DatabaseManager):
-        self.auth_manager = auth_manager
-        self.db = db
-    
-    async def handle_request(self, reader, writer):
-        """Handle HTTP requests"""
-        try:
-            data = await reader.read(1024)
-            request = data.decode()
-            
-            # Parse request
-            lines = request.split('\r\n')
-            if not lines:
-                return
-            
-            method, path, _ = lines[0].split(' ')
-            
-            # Parse headers and body
-            headers = {}
-            body_start = request.find('\r\n\r\n')
-            for line in lines[1:]:
-                if ': ' in line:
-                    key, value = line.split(': ', 1)
-                    headers[key] = value
-            
-            # Handle different endpoints
-            if method == 'POST' and path == '/api/register':
-                await self.handle_register(writer, request)
-            elif method == 'POST' and path == '/api/login':
-                await self.handle_login(writer, request)
-            elif method == 'POST' and path == '/api/logout':
-                await self.handle_logout(writer, headers)
-            elif method == 'GET' and path == '/api/health':
-                await self.handle_health(writer)
-            else:
-                await self.send_response(writer, 404, {'error': 'Not found'})
-                
-        except Exception as e:
-            logger.error(f"HTTP request error: {e}")
-            await self.send_response(writer, 500, {'error': 'Internal server error'})
-        finally:
-            writer.close()
-            await writer.wait_closed()
-    
-    async def handle_register(self, writer, request):
-        """Handle user registration"""
-        try:
-            body = json.loads(request.split('\r\n\r\n', 1)[1])
-            result = await self.auth_manager.register_user(
-                body.get('username', ''),
-                body.get('password', ''),
-                body.get('public_key', '')
-            )
-            status = 200 if result['success'] else 400
-            await self.send_response(writer, status, result)
-        except Exception as e:
-            logger.error(f"Registration error: {e}")
-            await self.send_response(writer, 400, {'success': False, 'error': str(e)})
-    
-    async def handle_login(self, writer, request):
-        """Handle user login"""
-        try:
-            body = json.loads(request.split('\r\n\r\n', 1)[1])
-            result = await self.auth_manager.login_user(
-                body.get('username', ''),
-                body.get('password', '')
-            )
-            status = 200 if result['success'] else 401
-            await self.send_response(writer, status, result)
-        except Exception as e:
-            logger.error(f"Login error: {e}")
-            await self.send_response(writer, 400, {'success': False, 'error': str(e)})
-    
-    async def handle_logout(self, writer, headers):
-        """Handle user logout"""
-        token = headers.get('Authorization', '').replace('Bearer ', '')
-        if token:
-            self.db.delete_session(token)
-        await self.send_response(writer, 200, {'success': True})
-    
-    async def handle_health(self, writer):
-        """Health check endpoint"""
-        await self.send_response(writer, 200, {'status': 'healthy', 'timestamp': datetime.now().isoformat()})
-    
-    async def send_response(self, writer, status_code, data):
-        """Send HTTP response"""
-        response = json.dumps(data)
-        response_line = f"HTTP/1.1 {status_code} OK\r\n"
-        headers = f"Content-Type: application/json\r\nContent-Length: {len(response)}\r\n\r\n"
-        writer.write((response_line + headers + response).encode())
-        await writer.drain()
 
 # ===============================
 # WEBSOCKET SERVER
@@ -585,7 +487,15 @@ class WebSocketServer:
         self.connections: Dict[str, Any] = {}
         self.typing_status: Dict[str, TypingStatus] = {}
         self.ip_connections: Dict[str, int] = {}
-        
+    
+    async def process_request(self, path: str, request_headers):
+        """Handle HTTP API requests on the same port"""
+        if path == '/api/health':
+            body = json.dumps({'status': 'healthy', 'timestamp': datetime.now().isoformat()})
+            headers = [('Content-Type', 'application/json'), ('Content-Length', str(len(body)))]
+            return 200, headers, body.encode()
+        return None  # Let websockets handle it
+    
     async def handler(self, websocket: Any, path: str):
         """Handle WebSocket connections"""
         client_ip = websocket.remote_address[0]
@@ -819,7 +729,6 @@ class JustUsServer:
         self.auth_manager = AuthManager(self.db)
         self.message_processor = MessageProcessor(self.db)
         self.ws_server = WebSocketServer(self.auth_manager, self.db, self.message_processor)
-        self.http_server = HTTPServer(self.auth_manager, self.db)
         self.scheduler = AsyncIOScheduler()
     
     async def cleanup_tasks(self):
@@ -840,47 +749,30 @@ class JustUsServer:
         
         self.scheduler.start()
     
-    async def start_http_server(self):
-        """Start HTTP API server"""
-        server = await asyncio.start_server(
-            self.http_server.handle_request,
-            Config.HOST,
-            Config.API_PORT
-        )
-        logger.info(f"HTTP API server running on {Config.HOST}:{Config.API_PORT}")
-        return server
-    
-    async def start_websocket_server(self):
-        """Start WebSocket server"""
+    async def start_server(self):
+        """Start combined WebSocket + HTTP API server"""
+        stop = asyncio.Future()
         async with websockets.serve(
             self.ws_server.handler,
             Config.HOST,
-            Config.WS_PORT,
+            Config.PORT,
+            process_request=self.ws_server.process_request,
             max_size=Config.MAX_MESSAGE_SIZE,
             ping_interval=20,
             ping_timeout=60
         ):
-            logger.info(f"WebSocket server running on ws://{Config.HOST}:{Config.WS_PORT}")
-            await asyncio.Future()  # Run forever
+            logger.info(f"Server running on 0.0.0.0:{Config.PORT}")
+            await stop  # Run forever
     
     async def run(self):
-        """Run both servers"""
+        """Start server"""
         logger.info("Starting JustUs Secret Chat Server...")
-        
-        # Start cleanup tasks
         await self.cleanup_tasks()
-        
-        # Start HTTP server
-        http_server = await self.start_http_server()
-        
         try:
-            # Start WebSocket server
-            await self.start_websocket_server()
+            await self.start_server()
         except KeyboardInterrupt:
             logger.info("Shutting down servers...")
         finally:
-            http_server.close()
-            await http_server.wait_closed()
             self.scheduler.shutdown()
 
 # ===============================
