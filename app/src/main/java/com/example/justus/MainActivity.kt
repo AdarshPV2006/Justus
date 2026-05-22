@@ -20,8 +20,8 @@ import android.os.Looper
 import android.view.HapticFeedbackConstants
 import android.view.SoundEffectConstants
 import android.view.WindowManager
-import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.appcompat.app.AppCompatActivity
 import androidx.biometric.BiometricPrompt
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
@@ -308,7 +308,7 @@ class WebSocketManager(
 // MAIN ACTIVITY
 // ===============================
 
-class MainActivity : ComponentActivity() {
+class MainActivity : AppCompatActivity() {
 
     private lateinit var sharedPreferences: SharedPreferences
     private lateinit var encryptionManager: EncryptionManager
@@ -605,8 +605,8 @@ fun LoginScreen(
                         },
                         modifier = Modifier.fillMaxWidth(),
                         colors = TextFieldDefaults.colors(
-                            focusedBorderColor = Color(0xFF4CAF50),
-                            unfocusedBorderColor = Color(0xFF333333),
+                            focusedIndicatorColor = Color(0xFF4CAF50),
+                            unfocusedIndicatorColor = Color(0xFF333333),
                             focusedTextColor = Color.White,
                             unfocusedTextColor = Color.White,
                             cursorColor = Color(0xFF4CAF50),
@@ -638,8 +638,8 @@ fun LoginScreen(
                         visualTransformation = if (showPassword) VisualTransformation.None else PasswordVisualTransformation(),
                         modifier = Modifier.fillMaxWidth(),
                         colors = TextFieldDefaults.colors(
-                            focusedBorderColor = Color(0xFF4CAF50),
-                            unfocusedBorderColor = Color(0xFF333333),
+                            focusedIndicatorColor = Color(0xFF4CAF50),
+                            unfocusedIndicatorColor = Color(0xFF333333),
                             focusedTextColor = Color.White,
                             unfocusedTextColor = Color.White,
                             cursorColor = Color(0xFF4CAF50),
@@ -663,8 +663,8 @@ fun LoginScreen(
                             visualTransformation = if (showPassword) VisualTransformation.None else PasswordVisualTransformation(),
                             modifier = Modifier.fillMaxWidth(),
                             colors = TextFieldDefaults.colors(
-                                focusedBorderColor = Color(0xFF4CAF50),
-                                unfocusedBorderColor = Color(0xFF333333),
+                                focusedIndicatorColor = Color(0xFF4CAF50),
+                                unfocusedIndicatorColor = Color(0xFF333333),
                                 focusedTextColor = Color.White,
                                 unfocusedTextColor = Color.White,
                                 cursorColor = Color(0xFF4CAF50),
@@ -1024,8 +1024,8 @@ fun ChatScreen(
                             },
                             textStyle = LocalTextStyle.current.copy(color = Color.White),
                             colors = TextFieldDefaults.colors(
-                                focusedBorderColor = Color(0xFF4CAF50),
-                                unfocusedBorderColor = Color(0xFF333333),
+                                focusedIndicatorColor = Color(0xFF4CAF50),
+                                unfocusedIndicatorColor = Color(0xFF333333),
                                 focusedTextColor = Color.White,
                                 unfocusedTextColor = Color.White,
                                 cursorColor = Color(0xFF4CAF50)
@@ -1414,8 +1414,8 @@ fun DecoyScreen(
                 visualTransformation = PasswordVisualTransformation(),
                 modifier = Modifier.fillMaxWidth(),
                 colors = TextFieldDefaults.colors(
-                    focusedBorderColor = Color(0xFF4CAF50),
-                    unfocusedBorderColor = Color(0xFF333333),
+                    focusedIndicatorColor = Color(0xFF4CAF50),
+                    unfocusedIndicatorColor = Color(0xFF333333),
                     focusedTextColor = Color.White,
                     unfocusedTextColor = Color.White,
                     cursorColor = Color(0xFF4CAF50),
