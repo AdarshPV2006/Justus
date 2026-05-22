@@ -12,7 +12,6 @@ from typing import Dict, Optional, Any
 from dataclasses import dataclass
 import logging
 
-import websockets
 from websockets.exceptions import ConnectionClosed
 import bcrypt
 import jwt
@@ -488,15 +487,66 @@ class WebSocketServer:
         self.typing_status: Dict[str, TypingStatus] = {}
         self.ip_connections: Dict[str, int] = {}
     
-    async def process_request(self, path: str, request_headers):
-        """Handle HTTP API requests on the same port"""
-        if path == '/api/health':
-            body = json.dumps({'status': 'healthy', 'timestamp': datetime.now().isoformat()})
-            headers = [('Content-Type', 'application/json'), ('Content-Length', str(len(body)))]
-            return 200, headers, body.encode()
-        return None  # Let websockets handle it
+    async def handle_connection(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+        """Handle both HTTP and WebSocket connections on the same port"""
+        try:
+            data = await reader.read(4096)
+            if not data:
+                return
+            request_text = data.decode('utf-8', errors='replace')
+            lines = request_text.split('\r\n')
+            first_line = lines[0] if lines else ''
+            parts = first_line.split(' ') if first_line else []
+            method = parts[0] if len(parts) > 0 else ''
+            path = parts[1] if len(parts) > 1 else '/'
+
+            # Handle non-GET methods (HEAD requests from Render's load balancer)
+            if method != 'GET':
+                body = 'OK'
+                response = f"HTTP/1.1 200 OK\r\nContent-Length: {len(body)}\r\n\r\n{body}"
+                writer.write(response.encode())
+                await writer.drain()
+                writer.close()
+                return
+
+            # Handle HTTP API endpoints (non-WebSocket GET)
+            is_ws = 'upgrade: websocket' in request_text.lower()
+            if not is_ws:
+                if path == '/api/health':
+                    body = json.dumps({'status': 'healthy', 'timestamp': datetime.now().isoformat()})
+                    response = f"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {len(body)}\r\n\r\n{body}"
+                    writer.write(response.encode())
+                    await writer.drain()
+                else:
+                    body = json.dumps({'error': 'Not found'})
+                    response = f"HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: {len(body)}\r\n\r\n{body}"
+                    writer.write(response.encode())
+                    await writer.drain()
+                writer.close()
+                return
+
+            # WebSocket connection - put data back and let websockets handle
+            reader.feed_data(data)
+            from websockets.asyncio.server import ServerConnection
+            conn = ServerConnection(
+                reader=reader,
+                writer=writer,
+                max_size=Config.MAX_MESSAGE_SIZE,
+                ping_interval=20,
+                ping_timeout=60,
+            )
+            await conn.handshake()
+            await self.handler(conn, path)
+
+        except Exception as e:
+            logger.debug(f"Connection handler error: {e}")
+            try:
+                writer.close()
+            except Exception:
+                pass
     
-    async def handler(self, websocket: Any, path: str):
+    async def process_request(self, path, request_headers):
+        return None  # All request handling is in handle_connection now
         """Handle WebSocket connections"""
         client_ip = websocket.remote_address[0]
         
@@ -750,19 +800,15 @@ class JustUsServer:
         self.scheduler.start()
     
     async def start_server(self):
-        """Start combined WebSocket + HTTP API server"""
-        stop = asyncio.Future()
-        async with websockets.serve(
-            self.ws_server.handler,
+        """Start combined WebSocket + HTTP API server using raw TCP server"""
+        server = await asyncio.start_server(
+            self.ws_server.handle_connection,
             Config.HOST,
-            Config.PORT,
-            process_request=self.ws_server.process_request,
-            max_size=Config.MAX_MESSAGE_SIZE,
-            ping_interval=20,
-            ping_timeout=60
-        ):
-            logger.info(f"Server running on 0.0.0.0:{Config.PORT}")
-            await stop  # Run forever
+            Config.PORT
+        )
+        logger.info(f"Server running on 0.0.0.0:{Config.PORT}")
+        async with server:
+            await server.serve_forever()
     
     async def run(self):
         """Start server"""
