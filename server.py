@@ -8,6 +8,7 @@ import secrets
 import sqlite3
 import ssl
 import time
+import os
 from datetime import datetime, timedelta
 from typing import Dict, Set, Optional
 from dataclasses import dataclass, asdict
@@ -40,17 +41,17 @@ logger = logging.getLogger(__name__)
 class Config:
     # Server settings
     HOST = "0.0.0.0"
-    PORT = 8080
-    WS_PORT = 8080
-    API_PORT = 8081
+    PORT = int(os.environ.get("PORT", 8080))
+    WS_PORT = PORT
+    API_PORT = PORT
     
     # Security
-    JWT_SECRET = "your-super-secret-jwt-key-change-this-in-production"  # Change this!
+    JWT_SECRET = os.environ.get("JWT_SECRET", "your-super-secret-jwt-key-change-this-in-production")
     JWT_ALGORITHM = "HS256"
     JWT_EXPIRY_HOURS = 24
     
     # Encryption
-    PEPPER = "justus-secret-pepper-change-this"  # Add to passwords before hashing
+    PEPPER = os.environ.get("PEPPER", "justus-secret-pepper-change-this")
     
     # Redis (for production)
     REDIS_HOST = "localhost"
