@@ -325,7 +325,7 @@ class MainActivity : AppCompatActivity() {
     private var currentUser by mutableStateOf("")
     private var showDecoyMode by mutableStateOf(false)
     private var showSettings by mutableStateOf(false)
-    private var serverUrl by mutableStateOf("ws://10.0.2.2:10000")
+    private var serverUrl by mutableStateOf("wss://justus-server-doac.onrender.com")
     private var chatRecipient by mutableStateOf("")
     private var connState by mutableStateOf(ConnectionState.DISCONNECTED)
 
