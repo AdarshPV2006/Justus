@@ -3,7 +3,7 @@
 // MainActivity.kt - JustUs Secret Chat App with Jetpack Compose
 // Complete single-file implementation
 
-package com.justus.secretchat
+package com.example.justus
 
 import android.app.NotificationChannel
 import android.app.NotificationManager
