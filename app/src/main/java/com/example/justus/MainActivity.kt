@@ -71,6 +71,7 @@ import com.google.accompanist.permissions.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 import okhttp3.*
+import okhttp3.MediaType.Companion.toMediaType
 import org.json.JSONObject
 import java.security.*
 import java.security.spec.X509EncodedKeySpec
@@ -784,7 +785,7 @@ fun LoginScreen(
                                     .readTimeout(10, TimeUnit.SECONDS)
                                     .build()
                                 val requestBody = okhttp3.RequestBody.create(
-                                    okhttp3.MediaType.parse("application/json; charset=utf-8"),
+                                    "application/json; charset=utf-8".toMediaType(),
                                     jsonBody.toString()
                                 )
                                 val request = okhttp3.Request.Builder()
