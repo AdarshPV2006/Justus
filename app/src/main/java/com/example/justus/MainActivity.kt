@@ -1,3 +1,5 @@
+@file:OptIn(ExperimentalMaterial3Api::class)
+
 // MainActivity.kt - JustUs Secret Chat App with Jetpack Compose
 // Complete single-file implementation
 
@@ -10,7 +12,6 @@ import android.content.Intent
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.graphics.drawable.shapes.Shape
-import android.hardware.biometrics.BiometricManager
 import android.os.Build
 import android.os.Bundle
 import android.os.CountDownTimer
@@ -36,6 +37,7 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -56,6 +58,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -145,7 +148,7 @@ class EncryptionManager {
             keyAgreement.doPhase(peerPublicKey, true)
 
             val sharedSecret = keyAgreement.generateSecret()
-            symmetricKey = SecretKeySpec(sharedSecret.encoded, "AES")
+            symmetricKey = SecretKeySpec(sharedSecret, "AES")
         } catch (e: Exception) {
             e.printStackTrace()
         }
@@ -445,18 +448,18 @@ class MainActivity : ComponentActivity() {
 
     private fun authenticateWithBiometrics() {
         val executor = ContextCompat.getMainExecutor(this)
-        val biometricPrompt = BiometricPrompt(this, executor,
-            object : BiometricPrompt.AuthenticationCallback() {
-                override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
-                    // Authentication successful
-                }
+        val callback = object : BiometricPrompt.AuthenticationCallback() {
+            override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
+                // Authentication successful
+            }
 
-                override fun onAuthenticationFailed() {
-                    if (!showDecoyMode) {
-                        finish()
-                    }
+            override fun onAuthenticationFailed() {
+                if (!showDecoyMode) {
+                    finish()
                 }
-            })
+            }
+        }
+        val biometricPrompt = BiometricPrompt(this, executor, callback)
 
         val promptInfo = BiometricPrompt.PromptInfo.Builder()
             .setTitle("JustUs Authentication")
@@ -601,11 +604,14 @@ fun LoginScreen(
                             Icon(Icons.Default.Person, contentDescription = null, tint = Color(0xFF4CAF50))
                         },
                         modifier = Modifier.fillMaxWidth(),
-                        colors = TextFieldDefaults.outlinedTextFieldColors(
+                        colors = TextFieldDefaults.colors(
                             focusedBorderColor = Color(0xFF4CAF50),
                             unfocusedBorderColor = Color(0xFF333333),
-                            textColor = Color.White,
-                            focusedLabelColor = Color(0xFF4CAF50)
+                            focusedTextColor = Color.White,
+                            unfocusedTextColor = Color.White,
+                            cursorColor = Color(0xFF4CAF50),
+                            focusedLabelColor = Color(0xFF4CAF50),
+                            unfocusedLabelColor = Color(0xFF888888)
                         ),
                         singleLine = true
                     )
@@ -631,11 +637,14 @@ fun LoginScreen(
                         },
                         visualTransformation = if (showPassword) VisualTransformation.None else PasswordVisualTransformation(),
                         modifier = Modifier.fillMaxWidth(),
-                        colors = TextFieldDefaults.outlinedTextFieldColors(
+                        colors = TextFieldDefaults.colors(
                             focusedBorderColor = Color(0xFF4CAF50),
                             unfocusedBorderColor = Color(0xFF333333),
-                            textColor = Color.White,
-                            focusedLabelColor = Color(0xFF4CAF50)
+                            focusedTextColor = Color.White,
+                            unfocusedTextColor = Color.White,
+                            cursorColor = Color(0xFF4CAF50),
+                            focusedLabelColor = Color(0xFF4CAF50),
+                            unfocusedLabelColor = Color(0xFF888888)
                         ),
                         singleLine = true
                     )
@@ -653,11 +662,14 @@ fun LoginScreen(
                             },
                             visualTransformation = if (showPassword) VisualTransformation.None else PasswordVisualTransformation(),
                             modifier = Modifier.fillMaxWidth(),
-                            colors = TextFieldDefaults.outlinedTextFieldColors(
+                            colors = TextFieldDefaults.colors(
                                 focusedBorderColor = Color(0xFF4CAF50),
                                 unfocusedBorderColor = Color(0xFF333333),
-                                textColor = Color.White,
-                                focusedLabelColor = Color(0xFF4CAF50)
+                                focusedTextColor = Color.White,
+                                unfocusedTextColor = Color.White,
+                                cursorColor = Color(0xFF4CAF50),
+                                focusedLabelColor = Color(0xFF4CAF50),
+                                unfocusedLabelColor = Color(0xFF888888)
                             ),
                             singleLine = true
                         )
@@ -930,24 +942,23 @@ fun ChatScreen(
                                 .padding(horizontal = 12.dp, vertical = 8.dp)
                         ) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
+                                val infiniteTransition = rememberInfiniteTransition()
                                 repeat(3) { index ->
+                                    val scale by infiniteTransition.animateFloat(
+                                        initialValue = 0.5f,
+                                        targetValue = 1f,
+                                        animationSpec = infiniteRepeatable(
+                                            animation = tween(300, delayMillis = index * 100, easing = FastOutSlowInEasing),
+                                            repeatMode = RepeatMode.Reverse
+                                        )
+                                    )
                                     Box(
                                         modifier = Modifier
                                             .size(6.dp)
                                             .padding(horizontal = 2.dp)
-                                            .animateContentSize()
                                             .graphicsLayer {
-                                                val infiniteTransition = rememberInfiniteTransition()
-                                                val scale by infiniteTransition.animateFloat(
-                                                    initialValue = 0.5f,
-                                                    targetValue = 1f,
-                                                    animationSpec = infiniteRepeatable(
-                                                        animation = tween(300, easing = FastOutSlowInEasing),
-                                                        repeatMode = RepeatMode.Reverse
-                                                    )
-                                                )
-                                                this.scaleX = scale
-                                                this.scaleY = scale
+                                                scaleX = scale
+                                                scaleY = scale
                                             }
                                     )
                                 }
@@ -1012,9 +1023,11 @@ fun ChatScreen(
                                 )
                             },
                             textStyle = LocalTextStyle.current.copy(color = Color.White),
-                            colors = TextFieldDefaults.outlinedTextFieldColors(
+                            colors = TextFieldDefaults.colors(
                                 focusedBorderColor = Color(0xFF4CAF50),
                                 unfocusedBorderColor = Color(0xFF333333),
+                                focusedTextColor = Color.White,
+                                unfocusedTextColor = Color.White,
                                 cursorColor = Color(0xFF4CAF50)
                             ),
                             maxLines = 4,
@@ -1272,13 +1285,16 @@ fun SelfDestructPickerDialog(
                 )
 
                 options.forEach { (label, seconds) ->
-                    RadioButton(
-                        selected = currentSeconds == seconds,
-                        onClick = { onSelect(seconds) },
+                    Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(vertical = 8.dp)
+                            .padding(vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
+                        RadioButton(
+                            selected = currentSeconds == seconds,
+                            onClick = { onSelect(seconds) }
+                        )
                         Text(
                             text = label,
                             color = if (currentSeconds == seconds) Color(0xFF4CAF50) else Color.White,
@@ -1397,10 +1413,14 @@ fun DecoyScreen(
                 label = { Text("Enter Decoy PIN", color = Color(0xFF888888)) },
                 visualTransformation = PasswordVisualTransformation(),
                 modifier = Modifier.fillMaxWidth(),
-                colors = TextFieldDefaults.outlinedTextFieldColors(
+                colors = TextFieldDefaults.colors(
                     focusedBorderColor = Color(0xFF4CAF50),
                     unfocusedBorderColor = Color(0xFF333333),
-                    textColor = Color.White
+                    focusedTextColor = Color.White,
+                    unfocusedTextColor = Color.White,
+                    cursorColor = Color(0xFF4CAF50),
+                    focusedLabelColor = Color(0xFF4CAF50),
+                    unfocusedLabelColor = Color(0xFF888888)
                 ),
                 isError = showError
             )

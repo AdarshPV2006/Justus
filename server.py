@@ -6,25 +6,16 @@ import json
 import hashlib
 import secrets
 import sqlite3
-import ssl
-import time
 import os
 from datetime import datetime, timedelta
-from typing import Dict, Set, Optional
-from dataclasses import dataclass, asdict
-from contextlib import asynccontextmanager
+from typing import Dict, Optional, Any
+from dataclasses import dataclass
 import logging
-from pathlib import Path
 
 import websockets
-from websockets.server import WebSocketServerProtocol
 from websockets.exceptions import ConnectionClosed
 import bcrypt
-from cryptography.fernet import Fernet
-from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2
 import jwt
-import redis.asyncio as redis
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # Configure logging
@@ -591,11 +582,11 @@ class WebSocketServer:
         self.auth_manager = auth_manager
         self.db = db
         self.message_processor = message_processor
-        self.connections: Dict[str, WebSocketServerProtocol] = {}
+        self.connections: Dict[str, Any] = {}
         self.typing_status: Dict[str, TypingStatus] = {}
         self.ip_connections: Dict[str, int] = {}
         
-    async def handler(self, websocket: WebSocketServerProtocol, path: str):
+    async def handler(self, websocket: Any, path: str):
         """Handle WebSocket connections"""
         client_ip = websocket.remote_address[0]
         
