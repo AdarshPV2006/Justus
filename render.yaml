@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: justus-server
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python server.py
+    healthCheckPath: /api/health
+    envVars:
+      - key: JWT_SECRET
+        generateValue: true
+      - key: PEPPER
+        generateValue: true
