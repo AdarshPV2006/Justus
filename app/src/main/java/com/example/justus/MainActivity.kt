@@ -17,8 +17,6 @@ import android.os.Bundle
 import android.os.CountDownTimer
 import android.os.Handler
 import android.os.Looper
-import android.view.HapticFeedbackConstants
-import android.view.SoundEffectConstants
 import android.view.WindowManager
 import androidx.activity.compose.setContent
 import androidx.appcompat.app.AppCompatActivity
@@ -46,28 +44,18 @@ import androidx.compose.ui.draw.*
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.*
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.hapticfeedback.HapticFeedbackType
-import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.focus.FocusManager
+import androidx.compose.ui.graphics.*
 import androidx.compose.ui.platform.LocalFocusManager
-import androidx.compose.ui.platform.LocalHapticFeedback
-import androidx.compose.ui.platform.LocalView
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
-import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
-import androidx.lifecycle.lifecycleScope
-import com.google.accompanist.permissions.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 import okhttp3.*
@@ -924,7 +912,6 @@ fun ChatScreen(
     var localRecipient by remember { mutableStateOf(chatRecipient) }
     val listState = rememberLazyListState()
     val focusManager = LocalFocusManager.current
-    val hapticFeedback = LocalHapticFeedback.current
 
     val typingDebounce = remember { Handler(Looper.getMainLooper()) }
 
@@ -935,352 +922,332 @@ fun ChatScreen(
     }
 
     val connColor = when (connectionState) {
-        ConnectionState.CONNECTED -> Color(0xFF4CAF50)
-        ConnectionState.CONNECTING, ConnectionState.RECONNECTING -> Color(0xFFFFC107)
-        ConnectionState.DISCONNECTED -> Color(0xFFf44336)
+        ConnectionState.CONNECTED -> Color(0xFF34C759)
+        ConnectionState.CONNECTING, ConnectionState.RECONNECTING -> Color(0xFFFFD60A)
+        ConnectionState.DISCONNECTED -> Color(0xFFFF453A)
     }
 
-    val connText = when (connectionState) {
-        ConnectionState.CONNECTED -> "Connected"
-        ConnectionState.CONNECTING -> "Connecting..."
-        ConnectionState.RECONNECTING -> "Reconnecting..."
-        ConnectionState.DISCONNECTED -> "Disconnected"
-    }
-
-    Scaffold(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(Color(0xFF0a0a0a)),
-        topBar = {
-            TopAppBar(
-                title = {
-                    Column {
+    Box(modifier = Modifier.fillMaxSize().background(Color(0xFF000000))) {
+        Column(modifier = Modifier.fillMaxSize()) {
+            // Top bar
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                color = Color(0xFF1C1C1E),
+                shadowElevation = 4.dp
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 8.dp, vertical = 10.dp)
+                        .statusBarsPadding(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    // Avatar
+                    val initial = if (chatRecipient.isNotEmpty()) chatRecipient.first().uppercase() else "?"
+                    Box(
+                        modifier = Modifier
+                            .size(40.dp)
+                            .background(Color(0xFF0A84FF), CircleShape),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(initial, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                    }
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Column(modifier = Modifier.weight(1f)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Text(
-                                text = "JustUs",
+                                text = chatRecipient.ifEmpty { "Select recipient" },
                                 color = Color.White,
-                                fontWeight = FontWeight.Bold
+                                fontWeight = FontWeight.SemiBold,
+                                fontSize = 16.sp
                             )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Box(
-                                modifier = Modifier
-                                    .size(8.dp)
-                                    .background(connColor, CircleShape)
-                            )
-                            Text(
-                                text = connText,
-                                fontSize = 10.sp,
-                                color = connColor,
-                                modifier = Modifier.padding(start = 4.dp)
-                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Box(modifier = Modifier.size(6.dp).background(connColor, CircleShape))
                         }
                         Text(
-                            text = currentUser,
-                            fontSize = 12.sp,
-                            color = Color(0xFF888888)
+                            text = when (connectionState) {
+                                ConnectionState.CONNECTED -> "Online"
+                                ConnectionState.CONNECTING -> "Connecting..."
+                                ConnectionState.RECONNECTING -> "Reconnecting..."
+                                ConnectionState.DISCONNECTED -> "Offline"
+                            },
+                            fontSize = 11.sp,
+                            color = connColor
                         )
                     }
-                },
-                actions = {
+                    // Self-destruct
                     IconButton(onClick = { showSelfDestructMenu = true }) {
                         Box {
                             Icon(
                                 Icons.Default.Timer,
-                                contentDescription = "Self Destruct",
-                                tint = if (selfDestructSeconds > 0) Color(0xFF4CAF50) else Color(0xFF888888)
+                                contentDescription = null,
+                                tint = if (selfDestructSeconds > 0) Color(0xFF30D158) else Color(0xFF8E8E93),
+                                modifier = Modifier.size(22.dp)
                             )
                             if (selfDestructSeconds > 0) {
                                 Text(
-                                    text = "${selfDestructSeconds}s",
+                                    "${selfDestructSeconds}s",
                                     fontSize = 8.sp,
-                                    color = Color(0xFF4CAF50),
+                                    color = Color(0xFF30D158),
+                                    fontWeight = FontWeight.Bold,
                                     modifier = Modifier.align(Alignment.BottomEnd)
                                 )
                             }
                         }
                     }
-                    IconButton(onClick = {
-                        hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
-                        onLockClick()
-                    }) {
-                        Icon(Icons.Default.Lock, contentDescription = "Lock", tint = Color.White)
-                    }
+                    // Menu
                     Box {
                         IconButton(onClick = { showMenu = true }) {
-                            Icon(Icons.Default.MoreVert, contentDescription = "Menu", tint = Color.White)
+                            Icon(Icons.Default.MoreVert, contentDescription = null, tint = Color(0xFF8E8E93))
                         }
                         DropdownMenu(
                             expanded = showMenu,
-                            onDismissRequest = { showMenu = false }
+                            onDismissRequest = { showMenu = false },
+                            tonalElevation = 8.dp
                         ) {
                             DropdownMenuItem(
-                                text = { Text("Settings") },
-                                onClick = {
-                                    showMenu = false
-                                    onSettingsClick()
-                                },
-                                leadingIcon = { Icon(Icons.Default.Settings, contentDescription = null) }
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Toggle Recipient") },
-                                onClick = {
-                                    showMenu = false
-                                    showRecipientField = !showRecipientField
-                                },
+                                text = { Text("Set Recipient") },
+                                onClick = { showMenu = false; showRecipientField = !showRecipientField },
                                 leadingIcon = { Icon(Icons.Default.Person, contentDescription = null) }
                             )
                             DropdownMenuItem(
-                                text = { Text("Lock App") },
-                                onClick = {
-                                    showMenu = false
-                                    onLockClick()
-                                },
+                                text = { Text("Lock") },
+                                onClick = { showMenu = false; onLockClick() },
                                 leadingIcon = { Icon(Icons.Default.Lock, contentDescription = null) }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Settings") },
+                                onClick = { showMenu = false; onSettingsClick() },
+                                leadingIcon = { Icon(Icons.Default.Settings, contentDescription = null) }
                             )
                         }
                     }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = Color(0xFF1a1a2e)
-                )
-            )
-        }
-    ) { paddingValues ->
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(paddingValues)
-                .pointerInput(Unit) {
-                    detectTapGestures(onTap = { focusManager.clearFocus() })
                 }
-        ) {
-            Column(
-                modifier = Modifier.fillMaxSize()
-            ) {
-                // Recipient field
-                if (showRecipientField) {
-                    OutlinedTextField(
-                        value = localRecipient,
-                        onValueChange = {
-                            localRecipient = it
-                            onRecipientChange(it)
-                        },
-                        label = { Text("Chatting with", color = Color(0xFF888888)) },
-                        placeholder = { Text("Enter recipient username", color = Color(0xFF555555)) },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 8.dp, vertical = 4.dp),
-                        colors = TextFieldDefaults.colors(
-                            focusedIndicatorColor = Color(0xFF4CAF50),
-                            unfocusedIndicatorColor = Color(0xFF333333),
-                            focusedTextColor = Color.White,
-                            unfocusedTextColor = Color.White,
-                            cursorColor = Color(0xFF4CAF50),
-                            focusedLabelColor = Color(0xFF4CAF50),
-                            unfocusedLabelColor = Color(0xFF888888)
-                        ),
-                        singleLine = true,
-                        textStyle = LocalTextStyle.current.copy(fontSize = 13.sp)
-                    )
-                }
+            }
 
-                // Messages List
-                if (messages.isEmpty()) {
-                    Box(
-                        modifier = Modifier
-                            .weight(1f)
-                            .fillMaxWidth(),
-                        contentAlignment = Alignment.Center
+            // Recipient field
+            if (showRecipientField) {
+                Surface(modifier = Modifier.fillMaxWidth(), color = Color(0xFF2C2C2E)) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
                     ) {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Icon(
-                                Icons.Default.Lock,
-                                contentDescription = null,
-                                modifier = Modifier.size(64.dp),
-                                tint = Color(0xFF333333)
-                            )
-                            Spacer(modifier = Modifier.height(16.dp))
-                            Text(
-                                text = "No messages yet",
-                                color = Color(0xFF555555),
-                                fontSize = 16.sp
-                            )
-                            Text(
-                                text = "Start a secret conversation",
-                                color = Color(0xFF444444),
-                                fontSize = 13.sp
-                            )
+                        Text("To:", color = Color(0xFF8E8E93), fontSize = 14.sp)
+                        TextField(
+                            value = localRecipient,
+                            onValueChange = { localRecipient = it; onRecipientChange(it) },
+                            placeholder = { Text("Username", color = Color(0xFF555555)) },
+                            modifier = Modifier.weight(1f),
+                            colors = TextFieldDefaults.colors(
+                                focusedTextColor = Color.White,
+                                unfocusedTextColor = Color.White,
+                                cursorColor = Color(0xFF0A84FF),
+                                focusedIndicatorColor = Color.Transparent,
+                                unfocusedIndicatorColor = Color.Transparent
+                            ),
+                            singleLine = true,
+                            textStyle = LocalTextStyle.current.copy(fontSize = 14.sp)
+                        )
+                        if (localRecipient.isNotEmpty()) {
+                            IconButton(onClick = { showRecipientField = false }) {
+                                Icon(Icons.Default.Close, contentDescription = null, tint = Color(0xFF8E8E93), modifier = Modifier.size(18.dp))
+                            }
                         }
+                    }
+                }
+            }
+
+            // Messages
+            Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                if (messages.isEmpty()) {
+                    Column(
+                        modifier = Modifier.align(Alignment.Center),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Icon(Icons.Default.Lock, contentDescription = null, modifier = Modifier.size(64.dp), tint = Color(0xFF333333))
+                        Spacer(modifier = Modifier.height(16.dp))
+                        Text("No messages yet", color = Color(0xFF555555), fontSize = 16.sp, fontWeight = FontWeight.Medium)
+                        Text("Start a secret conversation", color = Color(0xFF444444), fontSize = 13.sp)
                     }
                 } else {
                     LazyColumn(
                         state = listState,
-                        modifier = Modifier
-                            .weight(1f)
-                            .fillMaxWidth(),
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
+                        modifier = Modifier.fillMaxSize(),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
                         reverseLayout = false
                     ) {
-                        items(messages, key = { it.id }) { message ->
-                            ChatBubble(
-                                message = message,
-                                currentUser = currentUser,
-                                onReveal = { onRevealMessage(message.id) }
-                            )
-                        }
-                    }
-                }
-
-                // Typing Indicator
-                AnimatedVisibility(
-                    visible = isTyping,
-                    enter = fadeIn() + slideInVertically(),
-                    exit = fadeOut() + slideOutVertically()
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 4.dp),
-                        horizontalArrangement = Arrangement.Start
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .background(Color(0xFF2C2C2E), RoundedCornerShape(16.dp))
-                                .padding(horizontal = 12.dp, vertical = 8.dp)
-                        ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                val infiniteTransition = rememberInfiniteTransition()
-                                repeat(3) { index ->
-                                    val scale by infiniteTransition.animateFloat(
-                                        initialValue = 0.5f,
-                                        targetValue = 1f,
-                                        animationSpec = infiniteRepeatable(
-                                            animation = tween(300, delayMillis = index * 100, easing = FastOutSlowInEasing),
-                                            repeatMode = RepeatMode.Reverse
-                                        )
-                                    )
+                        items(messages, key = { it.id }) { msg ->
+                            val isSent = msg.sender == currentUser
+                            val showAvatar = !isSent
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
+                                horizontalArrangement = if (isSent) Arrangement.End else Arrangement.Start
+                            ) {
+                                if (!isSent && showAvatar) {
                                     Box(
                                         modifier = Modifier
-                                            .size(6.dp)
-                                            .padding(horizontal = 2.dp)
-                                            .graphicsLayer {
-                                                scaleX = scale
-                                                scaleY = scale
-                                            }
-                                    )
+                                            .size(32.dp)
+                                            .align(Alignment.Bottom)
+                                            .background(Color(0xFF0A84FF), CircleShape),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(msg.sender.first().uppercase(), color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                                    }
+                                    Spacer(modifier = Modifier.width(6.dp))
                                 }
-                                Text(
-                                    text = " Typing...",
-                                    fontSize = 12.sp,
-                                    color = Color(0xFF888888)
-                                )
+                                if (isSent) Spacer(modifier = Modifier.width(60.dp))
+                                Column(horizontalAlignment = if (isSent) Alignment.End else Alignment.Start) {
+                                    Box(
+                                        modifier = Modifier
+                                            .widthIn(max = 260.dp)
+                                            .background(
+                                                color = if (isSent) Color(0xFF0A84FF) else Color(0xFF1C1C1E),
+                                                shape = RoundedCornerShape(
+                                                    topStart = 18.dp, topEnd = 18.dp,
+                                                    bottomStart = if (isSent) 18.dp else 4.dp,
+                                                    bottomEnd = if (isSent) 4.dp else 18.dp
+                                                )
+                                            )
+                                            .padding(horizontal = 14.dp, vertical = 10.dp)
+                                    ) {
+                                        Text(
+                                            text = if (!isSent && msg.isBlurred) "••••••••" else msg.text,
+                                            color = Color.White,
+                                            fontSize = 15.sp,
+                                            modifier = Modifier.blur(if (!isSent && msg.isBlurred) 6.dp else 0.dp)
+                                        )
+                                        if (!isSent && msg.isBlurred) {
+                                            Box(
+                                                modifier = Modifier.matchParentSize(),
+                                                contentAlignment = Alignment.Center
+                                            ) {
+                                                Icon(Icons.Default.BlurOn, contentDescription = "Tap to reveal", tint = Color.White.copy(alpha = 0.3f), modifier = Modifier.size(20.dp))
+                                            }
+                                        }
+                                    }
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier.padding(top = 2.dp, start = 4.dp, end = 4.dp)
+                                    ) {
+                                        if (msg.selfDestructSeconds > 0 && msg.remainingDestructTime > 0) {
+                                            Text("${msg.remainingDestructTime}s", fontSize = 10.sp, color = Color(0xFFFF9F0A))
+                                            Spacer(modifier = Modifier.width(4.dp))
+                                        }
+                                        Text(
+                                            text = java.text.SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(msg.timestamp)),
+                                            fontSize = 10.sp,
+                                            color = Color(0xFF8E8E93)
+                                        )
+                                        if (isSent) {
+                                            Spacer(modifier = Modifier.width(4.dp))
+                                            when (msg.status) {
+                                                MessageStatus.SENDING -> CircularProgressIndicator(modifier = Modifier.size(10.dp), strokeWidth = 1.dp, color = Color(0xFF8E8E93))
+                                                MessageStatus.SENT -> Icon(Icons.Default.Done, contentDescription = null, modifier = Modifier.size(12.dp), tint = Color(0xFF8E8E93))
+                                                MessageStatus.DELIVERED -> Icon(Icons.Default.DoneAll, contentDescription = null, modifier = Modifier.size(12.dp), tint = Color(0xFF8E8E93))
+                                                MessageStatus.READ -> Icon(Icons.Default.DoneAll, contentDescription = null, modifier = Modifier.size(12.dp), tint = Color(0xFF0A84FF))
+                                            }
+                                        }
+                                    }
+                                }
+                                if (!isSent) Spacer(modifier = Modifier.width(60.dp))
+                                if (isSent && showAvatar) {
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Box(
+                                        modifier = Modifier.size(32.dp).align(Alignment.Bottom).background(Color(0xFF30D158), CircleShape),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(currentUser.first().uppercase(), color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                                    }
+                                }
                             }
                         }
                     }
                 }
+            }
 
-                // Input Area
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
-                    colors = CardDefaults.cardColors(containerColor = Color(0xFF1e1e2e))
+            // Typing
+            AnimatedVisibility(
+                visible = isTyping,
+                enter = fadeIn() + slideInVertically(),
+                exit = fadeOut() + slideOutVertically(),
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp)
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    val inf = rememberInfiniteTransition()
+                    repeat(3) { i ->
+                        val s by inf.animateFloat(0.5f, 1f, infiniteRepeatable(tween(300, delayMillis = i * 100, easing = FastOutSlowInEasing), RepeatMode.Reverse))
+                        Box(modifier = Modifier.size(5.dp).padding(1.dp).graphicsLayer { scaleX = s; scaleY = s })
+                    }
+                    Text("  Typing...", fontSize = 12.sp, color = Color(0xFF8E8E93))
+                }
+            }
+
+            // Input
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                color = Color(0xFF1C1C1E),
+                shadowElevation = 8.dp
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 8.dp).navigationBarsPadding(),
+                    verticalAlignment = Alignment.Bottom
                 ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 8.dp, vertical = 6.dp),
-                        verticalAlignment = Alignment.Bottom
-                    ) {
-                        // Self-destruct toggle
-                        IconButton(
-                            onClick = { showSelfDestructMenu = true },
-                            modifier = Modifier.size(36.dp)
-                        ) {
-                            Icon(
-                                Icons.Default.Timer,
-                                contentDescription = null,
-                                tint = if (selfDestructSeconds > 0) Color(0xFF4CAF50) else Color(0xFF666666),
-                                modifier = Modifier.size(20.dp)
-                            )
-                        }
-
-                        if (selfDestructSeconds > 0) {
-                            Text(
-                                text = "${selfDestructSeconds}s",
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = Color(0xFF4CAF50)
-                            )
-                        }
-
-                        OutlinedTextField(
-                            value = messageText,
-                            onValueChange = {
-                                messageText = it
-                                if (!isTyping && it.isNotBlank()) {
-                                    isTyping = true
-                                    onTyping(true)
-                                    typingDebounce.removeCallbacksAndMessages(null)
-                                    typingDebounce.postDelayed({
-                                        isTyping = false
-                                        onTyping(false)
-                                    }, 2000)
-                                }
-                            },
-                            modifier = Modifier
-                                .weight(1f)
-                                .padding(horizontal = 4.dp),
-                            placeholder = {
-                                Text("Secret message...", color = Color(0xFF666666))
-                            },
-                            textStyle = LocalTextStyle.current.copy(color = Color.White, fontSize = 14.sp),
-                            colors = TextFieldDefaults.colors(
-                                focusedIndicatorColor = Color(0xFF4CAF50),
-                                unfocusedIndicatorColor = Color(0xFF333333),
-                                focusedTextColor = Color.White,
-                                unfocusedTextColor = Color.White,
-                                cursorColor = Color(0xFF4CAF50)
-                            ),
-                            maxLines = 4,
-                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-                            keyboardActions = KeyboardActions(
-                                onSend = {
-                                    val recipient = localRecipient.ifEmpty { chatRecipient }
-                                    if (messageText.isNotBlank() && recipient.isNotBlank()) {
-                                        onSendMessage(messageText, recipient, selfDestructSeconds)
-                                        messageText = ""
-                                        focusManager.clearFocus()
-                                    }
-                                }
-                            )
-                        )
-
-                        Box(modifier = Modifier.size(44.dp)) {
-                            if (messageText.isNotBlank()) {
-                                FloatingActionButton(
-                                    onClick = {
-                                        val recipient = localRecipient.ifEmpty { chatRecipient }
-                                        if (messageText.isNotBlank() && recipient.isNotBlank()) {
-                                            hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
-                                            onSendMessage(messageText, recipient, selfDestructSeconds)
-                                            messageText = ""
-                                            focusManager.clearFocus()
-                                        }
-                                    },
-                                    modifier = Modifier.size(44.dp),
-                                    containerColor = if (localRecipient.isNotEmpty() || chatRecipient.isNotEmpty())
-                                        Color(0xFF4CAF50) else Color(0xFF555555),
-                                    shape = CircleShape
-                                ) {
-                                    Icon(
-                                        Icons.Default.Send,
-                                        contentDescription = "Send",
-                                        tint = Color.White,
-                                        modifier = Modifier.size(20.dp)
-                                    )
-                                }
+                    IconButton(onClick = { showSelfDestructMenu = true }, modifier = Modifier.size(36.dp)) {
+                        Icon(Icons.Default.Timer, contentDescription = null, tint = if (selfDestructSeconds > 0) Color(0xFF30D158) else Color(0xFF555555), modifier = Modifier.size(20.dp))
+                    }
+                    OutlinedTextField(
+                        value = messageText,
+                        onValueChange = {
+                            messageText = it
+                            if (!isTyping && it.isNotBlank()) {
+                                isTyping = true; onTyping(true)
+                                typingDebounce.removeCallbacksAndMessages(null)
+                                typingDebounce.postDelayed({ isTyping = false; onTyping(false) }, 2000)
                             }
-                        }
+                        },
+                        modifier = Modifier.weight(1f).padding(horizontal = 4.dp),
+                        placeholder = { Text("iMessage", color = Color(0xFF555555)) },
+                        textStyle = LocalTextStyle.current.copy(color = Color.White, fontSize = 15.sp),
+                        colors = TextFieldDefaults.colors(
+                            focusedIndicatorColor = Color.Transparent,
+                            unfocusedIndicatorColor = Color.Transparent,
+                            focusedTextColor = Color.White,
+                            unfocusedTextColor = Color.White,
+                            cursorColor = Color(0xFF0A84FF)
+                        ),
+                        maxLines = 4,
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                        keyboardActions = KeyboardActions(onSend = {
+                            val r = localRecipient.ifEmpty { chatRecipient }
+                            if (messageText.isNotBlank() && r.isNotBlank()) {
+                                onSendMessage(messageText, r, selfDestructSeconds)
+                                messageText = ""; focusManager.clearFocus()
+                            }
+                        })
+                    )
+                    IconButton(
+                        onClick = {
+                            val r = localRecipient.ifEmpty { chatRecipient }
+                            if (messageText.isNotBlank() && r.isNotBlank()) {
+                                onSendMessage(messageText, r, selfDestructSeconds)
+                                messageText = ""; focusManager.clearFocus()
+                            }
+                        },
+                        modifier = Modifier.size(36.dp),
+                        enabled = messageText.isNotBlank() && (localRecipient.isNotEmpty() || chatRecipient.isNotEmpty())
+                    ) {
+                        Icon(
+                            Icons.Default.ArrowUpward,
+                            contentDescription = "Send",
+                            tint = if (messageText.isNotBlank() && (localRecipient.isNotEmpty() || chatRecipient.isNotEmpty())) Color.White else Color(0xFF333333),
+                            modifier = Modifier
+                                .size(24.dp)
+                                .background(
+                                    if (messageText.isNotBlank() && (localRecipient.isNotEmpty() || chatRecipient.isNotEmpty())) Color(0xFF0A84FF) else Color.Transparent,
+                                    CircleShape
+                                )
+                                .padding(4.dp)
+                        )
                     }
                 }
             }
@@ -1290,159 +1257,9 @@ fun ChatScreen(
     if (showSelfDestructMenu) {
         SelfDestructPickerDialog(
             currentSeconds = selfDestructSeconds,
-            onSelect = { seconds ->
-                selfDestructSeconds = seconds
-                showSelfDestructMenu = false
-            },
+            onSelect = { seconds -> selfDestructSeconds = seconds; showSelfDestructMenu = false },
             onDismiss = { showSelfDestructMenu = false }
         )
-    }
-}
-
-@Composable
-fun ChatBubble(
-    message: ChatMessage,
-    currentUser: String,
-    onReveal: () -> Unit
-) {
-    val isSent = message.sender == currentUser
-    var isRevealed by remember { mutableStateOf(!message.isBlurred) }
-
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 4.dp),
-        horizontalArrangement = if (isSent) Arrangement.End else Arrangement.Start
-    ) {
-        Card(
-            modifier = Modifier
-                .widthIn(max = 280.dp)
-                .animateContentSize(),
-            shape = RoundedCornerShape(
-                topStart = 16.dp,
-                topEnd = 16.dp,
-                bottomStart = if (isSent) 16.dp else 4.dp,
-                bottomEnd = if (isSent) 4.dp else 16.dp
-            ),
-            colors = CardDefaults.cardColors(
-                containerColor = if (isSent) Color(0xFF2E7D32) else Color(0xFF1C1C1E)
-            ),
-            elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
-        ) {
-            Column(
-                modifier = Modifier.padding(12.dp)
-            ) {
-                // Message content with blur
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .pointerInput(Unit) {
-                            detectTapGestures(
-                                onTap = {
-                                    if (!isRevealed && !isSent) {
-                                        isRevealed = true
-                                        onReveal()
-                                    }
-                                }
-                            )
-                        }
-                ) {
-                    Text(
-                        text = if (isRevealed || isSent) message.text else "••••••••",
-                        color = Color.White,
-                        fontSize = 14.sp,
-                        modifier = Modifier
-                            .blur(if (!isRevealed && !isSent) 4.dp else 0.dp)
-                    )
-
-                    if (!isRevealed && !isSent) {
-                        Box(
-                            modifier = Modifier
-                                .matchParentSize()
-                                .background(
-                                    brush = Brush.radialGradient(
-                                        colors = listOf(Color.Transparent, Color(0xFF000000)),
-                                        radius = 50f
-                                    )
-                                ),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(
-                                Icons.Default.BlurOn,
-                                contentDescription = "Tap to reveal",
-                                tint = Color.White.copy(alpha = 0.5f),
-                                modifier = Modifier.size(24.dp)
-                            )
-                        }
-                    }
-                }
-
-                // Status row
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(top = 4.dp),
-                    horizontalArrangement = Arrangement.End,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    // Self-destruct timer
-                    if (message.selfDestructSeconds > 0 && message.remainingDestructTime > 0) {
-                        Text(
-                            text = "${message.remainingDestructTime}s",
-                            fontSize = 10.sp,
-                            color = Color(0xFFFF9800)
-                        )
-                        Spacer(modifier = Modifier.width(4.dp))
-                    }
-
-                    // Status icon for sent messages
-                    if (isSent) {
-                        when (message.status) {
-                            MessageStatus.SENDING -> {
-                                CircularProgressIndicator(
-                                    modifier = Modifier.size(12.dp),
-                                    strokeWidth = 1.dp,
-                                    color = Color(0xFF888888)
-                                )
-                            }
-                            MessageStatus.SENT -> {
-                                Icon(
-                                    Icons.Default.Done,
-                                    contentDescription = "Sent",
-                                    modifier = Modifier.size(12.dp),
-                                    tint = Color(0xFF888888)
-                                )
-                            }
-                            MessageStatus.DELIVERED -> {
-                                Icon(
-                                    Icons.Default.DoneAll,
-                                    contentDescription = "Delivered",
-                                    modifier = Modifier.size(12.dp),
-                                    tint = Color(0xFF888888)
-                                )
-                            }
-                            MessageStatus.READ -> {
-                                Icon(
-                                    Icons.Default.DoneAll,
-                                    contentDescription = "Read",
-                                    modifier = Modifier.size(12.dp),
-                                    tint = Color(0xFF4CAF50)
-                                )
-                            }
-                        }
-                    }
-
-                    // Timestamp
-                    Text(
-                        text = java.text.SimpleDateFormat("HH:mm", Locale.getDefault())
-                            .format(Date(message.timestamp)),
-                        fontSize = 10.sp,
-                        color = Color(0xFF888888),
-                        modifier = Modifier.padding(start = 4.dp)
-                    )
-                }
-            }
-        }
     }
 }
 
@@ -1452,76 +1269,21 @@ fun SelfDestructPickerDialog(
     onSelect: (Int) -> Unit,
     onDismiss: () -> Unit
 ) {
-    Dialog(
-        onDismissRequest = onDismiss,
-        properties = DialogProperties(usePlatformDefaultWidth = false)
-    ) {
+    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Card(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(24.dp),
-            shape = RoundedCornerShape(16.dp),
-            colors = CardDefaults.cardColors(
-                containerColor = Color(0xFF1e1e2e)
-            )
+            modifier = Modifier.fillMaxWidth().padding(24.dp),
+            shape = RoundedCornerShape(20.dp),
+            colors = CardDefaults.cardColors(containerColor = Color(0xFF1C1C1E))
         ) {
-            Column(
-                modifier = Modifier.padding(20.dp)
-            ) {
-                Text(
-                    text = "Self-Destruct Timer",
-                    fontSize = 20.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = Color.White
-                )
-
-                Text(
-                    text = "Messages will disappear after selected time",
-                    fontSize = 14.sp,
-                    color = Color(0xFF888888),
-                    modifier = Modifier.padding(top = 4.dp)
-                )
-
-                Spacer(modifier = Modifier.height(20.dp))
-
-                val options = listOf(
-                    "Off" to 0,
-                    "5 seconds" to 5,
-                    "10 seconds" to 10,
-                    "30 seconds" to 30,
-                    "1 minute" to 60,
-                    "5 minutes" to 300
-                )
-
-                options.forEach { (label, seconds) ->
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        RadioButton(
-                            selected = currentSeconds == seconds,
-                            onClick = { onSelect(seconds) }
-                        )
-                        Text(
-                            text = label,
-                            color = if (currentSeconds == seconds) Color(0xFF4CAF50) else Color.White,
-                            modifier = Modifier.padding(start = 12.dp)
-                        )
-                    }
-                }
-
+            Column(modifier = Modifier.padding(20.dp)) {
+                Text("Self-Destruct Timer", fontWeight = FontWeight.Bold, fontSize = 20.sp, color = Color.White)
+                Text("Messages will disappear after selected time", fontSize = 13.sp, color = Color(0xFF8E8E93), modifier = Modifier.padding(top = 4.dp))
                 Spacer(modifier = Modifier.height(16.dp))
-
-                Button(
-                    onClick = onDismiss,
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = Color(0xFF4CAF50)
-                    )
-                ) {
-                    Text("Close")
+                listOf("Off" to 0, "5s" to 5, "10s" to 10, "30s" to 30, "1m" to 60, "5m" to 300).forEach { (l, s) ->
+                    Row(modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                        RadioButton(selected = currentSeconds == s, onClick = { onSelect(s) }, colors = RadioButtonDefaults.colors(selectedColor = Color(0xFF0A84FF)))
+                        Text(l, color = if (currentSeconds == s) Color(0xFF0A84FF) else Color.White, fontSize = 15.sp, modifier = Modifier.padding(start = 8.dp))
+                    }
                 }
             }
         }
