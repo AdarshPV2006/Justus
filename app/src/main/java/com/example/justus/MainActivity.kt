@@ -71,7 +71,6 @@ import com.google.accompanist.permissions.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 import okhttp3.*
-import okio.ByteString
 import org.json.JSONObject
 import java.security.*
 import java.security.spec.X509EncodedKeySpec
@@ -201,13 +200,15 @@ class WebSocketManager(
 
     private var currentUser = ""
     private var sessionToken = ""
+    private var serverUrl = ""
     private var isReconnecting = false
 
-    fun connect(username: String, token: String, serverUrl: String) {
+    fun connect(username: String, token: String, url: String) {
         currentUser = username
         sessionToken = token
+        serverUrl = url
         val request = Request.Builder()
-            .url("$serverUrl/ws?token=$token&user=$username")
+            .url("$url/ws?token=$token&user=$username")
             .build()
 
         webSocket = client.newWebSocket(request, object : WebSocketListener() {
@@ -230,12 +231,16 @@ class WebSocketManager(
                         onTyping(sender, isTyping)
                     }
                     "delivered" -> {
-                        val messageId = json.getString("messageId")
-                        onStatusUpdate(messageId, MessageStatus.DELIVERED)
+                        val messageId = json.optString("messageId", "")
+                        if (messageId.isNotEmpty()) {
+                            onStatusUpdate(messageId, MessageStatus.DELIVERED)
+                        }
                     }
                     "read" -> {
-                        val messageId = json.getString("messageId")
-                        onStatusUpdate(messageId, MessageStatus.READ)
+                        val messageId = json.optString("messageId", "")
+                        if (messageId.isNotEmpty()) {
+                            onStatusUpdate(messageId, MessageStatus.READ)
+                        }
                     }
                 }
             }
@@ -253,21 +258,22 @@ class WebSocketManager(
     }
 
     private fun attemptReconnect() {
-        if (!isReconnecting) {
+        if (!isReconnecting && currentUser.isNotEmpty() && sessionToken.isNotEmpty() && serverUrl.isNotEmpty()) {
             isReconnecting = true
             onConnectionChange(ConnectionState.RECONNECTING)
             Handler(Looper.getMainLooper()).postDelayed({
-                connect(currentUser, sessionToken, "ws://your-server-ip:8080")
+                connect(currentUser, sessionToken, serverUrl)
             }, 3000)
         }
     }
 
-    fun sendMessage(messageId: String, encryptedContent: String) {
+    fun sendMessage(messageId: String, encryptedContent: String, recipient: String) {
         val json = JSONObject().apply {
             put("type", "message")
             put("id", messageId)
             put("content", encryptedContent)
             put("sender", currentUser)
+            put("recipient", recipient)
             put("timestamp", System.currentTimeMillis())
         }
         webSocket?.send(json.toString())
@@ -317,6 +323,10 @@ class MainActivity : AppCompatActivity() {
     private var isAuthenticated by mutableStateOf(false)
     private var currentUser by mutableStateOf("")
     private var showDecoyMode by mutableStateOf(false)
+    private var showSettings by mutableStateOf(false)
+    private var serverUrl by mutableStateOf("ws://10.0.2.2:10000")
+    private var chatRecipient by mutableStateOf("")
+    private var connState by mutableStateOf(ConnectionState.DISCONNECTED)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -339,24 +349,40 @@ class MainActivity : AppCompatActivity() {
                     DecoyScreen(onExitDecoy = { exitDecoyMode() })
                 } else if (!isAuthenticated) {
                     LoginScreen(
-                        onLoginSuccess = { username, token ->
+                        serverUrl = serverUrl,
+                        onServerUrlChange = { serverUrl = it },
+                        onLoginSuccess = { username, token, url ->
+                            serverUrl = url
                             currentUser = username
                             isAuthenticated = true
-                            initializeChat(username, token)
+                            sharedPreferences.edit()
+                                .putString("serverUrl", url)
+                                .putString("username", username)
+                                .putString("sessionToken", token)
+                                .apply()
+                            initializeChat(username, token, url)
                         }
                     )
                 } else {
                     ChatScreen(
                         messages = messages,
                         currentUser = currentUser,
-                        onSendMessage = { text, selfDestructSeconds ->
-                            sendMessage(text, selfDestructSeconds)
+                        chatRecipient = chatRecipient,
+                        onRecipientChange = { chatRecipient = it },
+                        connectionState = connState,
+                        onSendMessage = { text, recipient, selfDestructSeconds ->
+                            sendMessage(text, recipient, selfDestructSeconds)
                         },
                         onTyping = { isTyping ->
                             webSocketManager?.sendTypingIndicator(isTyping)
                         },
                         onRevealMessage = { messageId ->
                             webSocketManager?.sendReadReceipt(messageId)
+                        },
+                        onSettingsClick = { showSettings = true },
+                        onLockClick = {
+                            isAuthenticated = false
+                            authenticateWithBiometrics()
                         }
                     )
                 }
@@ -369,7 +395,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun initializeChat(username: String, token: String) {
+    private fun initializeChat(username: String, token: String, url: String) {
         webSocketManager = WebSocketManager(
             onMessage = { encryptedContent, sender ->
                 val decrypted = encryptionManager.decryptMessage(encryptedContent)
@@ -396,18 +422,16 @@ class MainActivity : AppCompatActivity() {
                 }
             },
             onConnectionChange = { state ->
-                // Update connection status in UI
+                connState = state
             }
         )
 
-        webSocketManager?.connect(username, token, "ws://your-server-ip:8080")
-
-        // Exchange encryption keys
+        webSocketManager?.connect(username, token, url)
+        encryptionManager = EncryptionManager()
         val publicKeyBytes = encryptionManager.getPublicKeyBytes()
-        // Send public key to server for peer exchange
     }
 
-    private fun sendMessage(text: String, selfDestructSeconds: Int) {
+    private fun sendMessage(text: String, recipient: String, selfDestructSeconds: Int) {
         val encrypted = encryptionManager.encryptMessage(text)
         val messageId = UUID.randomUUID().toString()
         val message = ChatMessage(
@@ -421,7 +445,7 @@ class MainActivity : AppCompatActivity() {
             isBlurred = false
         )
         messages.add(message)
-        webSocketManager?.sendMessage(messageId, encrypted)
+        webSocketManager?.sendMessage(messageId, encrypted, recipient)
 
         if (selfDestructSeconds > 0) {
             startSelfDestructTimer(messageId, selfDestructSeconds)
@@ -499,7 +523,9 @@ class MainActivity : AppCompatActivity() {
 
 @Composable
 fun LoginScreen(
-    onLoginSuccess: (String, String) -> Unit
+    serverUrl: String,
+    onServerUrlChange: (String) -> Unit,
+    onLoginSuccess: (String, String, String) -> Unit
 ) {
     var isLoginMode by remember { mutableStateOf(true) }
     var username by remember { mutableStateOf("") }
@@ -508,6 +534,8 @@ fun LoginScreen(
     var showPassword by remember { mutableStateOf(false) }
     var isLoading by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
+    var showUrlField by remember { mutableStateOf(false) }
+    var localServerUrl by remember { mutableStateOf(serverUrl) }
 
     val context = LocalContext.current
     val focusManager = LocalFocusManager.current
@@ -593,7 +621,46 @@ fun LoginScreen(
                         color = Color(0xFF888888)
                     )
 
-                    Spacer(modifier = Modifier.height(32.dp))
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    // Server URL toggle
+                    TextButton(onClick = { showUrlField = !showUrlField }) {
+                        Icon(
+                            Icons.Default.Settings,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp),
+                            tint = Color(0xFF4CAF50)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = "Server",
+                            color = Color(0xFF4CAF50),
+                            fontSize = 12.sp
+                        )
+                    }
+
+                    if (showUrlField) {
+                        OutlinedTextField(
+                            value = localServerUrl,
+                            onValueChange = { localServerUrl = it },
+                            label = { Text("Server URL", color = Color(0xFF888888)) },
+                            placeholder = { Text("ws://host:port", color = Color(0xFF555555)) },
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = TextFieldDefaults.colors(
+                                focusedIndicatorColor = Color(0xFF4CAF50),
+                                unfocusedIndicatorColor = Color(0xFF333333),
+                                focusedTextColor = Color.White,
+                                unfocusedTextColor = Color.White,
+                                cursorColor = Color(0xFF4CAF50),
+                                focusedLabelColor = Color(0xFF4CAF50),
+                                unfocusedLabelColor = Color(0xFF888888)
+                            ),
+                            singleLine = true
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                    }
+
+                    Spacer(modifier = Modifier.height(8.dp))
 
                     // Username Field
                     OutlinedTextField(
@@ -652,7 +719,6 @@ fun LoginScreen(
                     if (!isLoginMode) {
                         Spacer(modifier = Modifier.height(16.dp))
 
-                        // Confirm Password Field
                         OutlinedTextField(
                             value = confirmPassword,
                             onValueChange = { confirmPassword = it },
@@ -686,7 +752,6 @@ fun LoginScreen(
 
                     Spacer(modifier = Modifier.height(32.dp))
 
-                    // Submit Button
                     Button(
                         onClick = {
                             focusManager.clearFocus()
@@ -701,22 +766,65 @@ fun LoginScreen(
                             }
 
                             isLoading = true
+                            errorMessage = null
+                            val url = localServerUrl.trimEnd('/')
+                            onServerUrlChange(url)
 
-                            // Simulate authentication (replace with actual API call)
-                            Handler(Looper.getMainLooper()).postDelayed({
-                                isLoading = false
-                                val sessionToken = UUID.randomUUID().toString()
+                            // Call server API
+                            val endpoint = if (isLoginMode) "$url/api/login" else "$url/api/register"
+                            val jsonBody = JSONObject().apply {
+                                put("username", username)
+                                put("password", password)
+                                put("public_key", "")
+                            }
 
-                                // Save credentials
+                            try {
+                                val okHttpClient = OkHttpClient.Builder()
+                                    .connectTimeout(10, TimeUnit.SECONDS)
+                                    .readTimeout(10, TimeUnit.SECONDS)
+                                    .build()
+                                val requestBody = okhttp3.RequestBody.create(
+                                    okhttp3.MediaType.parse("application/json; charset=utf-8"),
+                                    jsonBody.toString()
+                                )
+                                val request = okhttp3.Request.Builder()
+                                    .url(endpoint)
+                                    .post(requestBody)
+                                    .build()
+
+                                // Run in background thread
                                 val prefs = context.getSharedPreferences("JustUsSecure", Context.MODE_PRIVATE)
-                                prefs.edit()
-                                    .putString("sessionToken", sessionToken)
-                                    .putString("username", username)
-                                    .putBoolean("biometricEnabled", true)
-                                    .apply()
+                                CoroutineScope(Dispatchers.IO).launch {
+                                    try {
+                                        val response = okHttpClient.newCall(request).execute()
+                                        val responseBody = response.body?.string() ?: "{}"
+                                        val result = JSONObject(responseBody)
 
-                                onLoginSuccess(username, sessionToken)
-                            }, 1500)
+                                        withContext(Dispatchers.Main) {
+                                            isLoading = false
+                                            if (result.optBoolean("success", false)) {
+                                                val token = result.getString("token")
+                                                prefs.edit()
+                                                    .putString("sessionToken", token)
+                                                    .putString("username", username)
+                                                    .putBoolean("biometricEnabled", true)
+                                                    .apply()
+                                                onLoginSuccess(username, token, url)
+                                            } else {
+                                                errorMessage = result.optString("error", "Server error")
+                                            }
+                                        }
+                                    } catch (e: Exception) {
+                                        withContext(Dispatchers.Main) {
+                                            isLoading = false
+                                            errorMessage = "Cannot reach server"
+                                        }
+                                    }
+                                }
+                            } catch (e: Exception) {
+                                isLoading = false
+                                errorMessage = "Connection failed"
+                            }
                         },
                         modifier = Modifier
                             .fillMaxWidth()
@@ -743,7 +851,6 @@ fun LoginScreen(
 
                     Spacer(modifier = Modifier.height(16.dp))
 
-                    // Toggle Login/Register
                     TextButton(
                         onClick = {
                             isLoginMode = !isLoginMode
@@ -760,7 +867,6 @@ fun LoginScreen(
 
             Spacer(modifier = Modifier.height(24.dp))
 
-            // Security Indicators
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.Center,
@@ -794,33 +900,50 @@ fun LoginScreen(
     }
 }
 
-@OptIn(ExperimentalFoundationApi::class)
+@OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
 @Composable
 fun ChatScreen(
     messages: List<ChatMessage>,
     currentUser: String,
-    onSendMessage: (String, Int) -> Unit,
+    chatRecipient: String,
+    onRecipientChange: (String) -> Unit,
+    connectionState: ConnectionState,
+    onSendMessage: (String, String, Int) -> Unit,
     onTyping: (Boolean) -> Unit,
-    onRevealMessage: (String) -> Unit
+    onRevealMessage: (String) -> Unit,
+    onSettingsClick: () -> Unit,
+    onLockClick: () -> Unit
 ) {
     var messageText by remember { mutableStateOf("") }
     var isTyping by remember { mutableStateOf(false) }
     var selfDestructSeconds by remember { mutableStateOf(0) }
     var showSelfDestructMenu by remember { mutableStateOf(false) }
+    var showMenu by remember { mutableStateOf(false) }
+    var showRecipientField by remember { mutableStateOf(chatRecipient.isEmpty()) }
+    var localRecipient by remember { mutableStateOf(chatRecipient) }
     val listState = rememberLazyListState()
     val focusManager = LocalFocusManager.current
     val hapticFeedback = LocalHapticFeedback.current
-    val context = LocalContext.current
 
-    // Typing debounce
-    val typingDebounce = remember {
-        Handler(Looper.getMainLooper())
-    }
+    val typingDebounce = remember { Handler(Looper.getMainLooper()) }
 
     LaunchedEffect(messages.size) {
         if (messages.isNotEmpty()) {
             listState.animateScrollToItem(messages.size - 1)
         }
+    }
+
+    val connColor = when (connectionState) {
+        ConnectionState.CONNECTED -> Color(0xFF4CAF50)
+        ConnectionState.CONNECTING, ConnectionState.RECONNECTING -> Color(0xFFFFC107)
+        ConnectionState.DISCONNECTED -> Color(0xFFf44336)
+    }
+
+    val connText = when (connectionState) {
+        ConnectionState.CONNECTED -> "Connected"
+        ConnectionState.CONNECTING -> "Connecting..."
+        ConnectionState.RECONNECTING -> "Reconnecting..."
+        ConnectionState.DISCONNECTED -> "Disconnected"
     }
 
     Scaffold(
@@ -831,11 +954,25 @@ fun ChatScreen(
             TopAppBar(
                 title = {
                     Column {
-                        Text(
-                            text = "JustUs",
-                            color = Color.White,
-                            fontWeight = FontWeight.Bold
-                        )
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                text = "JustUs",
+                                color = Color.White,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Box(
+                                modifier = Modifier
+                                    .size(8.dp)
+                                    .background(connColor, CircleShape)
+                            )
+                            Text(
+                                text = connText,
+                                fontSize = 10.sp,
+                                color = connColor,
+                                modifier = Modifier.padding(start = 4.dp)
+                            )
+                        }
                         Text(
                             text = currentUser,
                             fontSize = 12.sp,
@@ -844,52 +981,68 @@ fun ChatScreen(
                     }
                 },
                 actions = {
-                    // Self-destruct indicator
                     IconButton(onClick = { showSelfDestructMenu = true }) {
-                        Badge(
-                            containerColor = if (selfDestructSeconds > 0) Color(0xFF4CAF50) else Color.Transparent
-                        ) {
+                        Box {
                             Icon(
                                 Icons.Default.Timer,
                                 contentDescription = "Self Destruct",
-                                tint = if (selfDestructSeconds > 0) Color(0xFF4CAF50) else Color.White
+                                tint = if (selfDestructSeconds > 0) Color(0xFF4CAF50) else Color(0xFF888888)
                             )
+                            if (selfDestructSeconds > 0) {
+                                Text(
+                                    text = "${selfDestructSeconds}s",
+                                    fontSize = 8.sp,
+                                    color = Color(0xFF4CAF50),
+                                    modifier = Modifier.align(Alignment.BottomEnd)
+                                )
+                            }
                         }
                     }
-
-                    // Lock button
                     IconButton(onClick = {
                         hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
-                        // Lock app
+                        onLockClick()
                     }) {
                         Icon(Icons.Default.Lock, contentDescription = "Lock", tint = Color.White)
                     }
-
-                    // Menu
-                    IconButton(onClick = { /* Show menu */ }) {
-                        Icon(Icons.Default.MoreVert, contentDescription = "Menu", tint = Color.White)
+                    Box {
+                        IconButton(onClick = { showMenu = true }) {
+                            Icon(Icons.Default.MoreVert, contentDescription = "Menu", tint = Color.White)
+                        }
+                        DropdownMenu(
+                            expanded = showMenu,
+                            onDismissRequest = { showMenu = false }
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text("Settings") },
+                                onClick = {
+                                    showMenu = false
+                                    onSettingsClick()
+                                },
+                                leadingIcon = { Icon(Icons.Default.Settings, contentDescription = null) }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Toggle Recipient") },
+                                onClick = {
+                                    showMenu = false
+                                    showRecipientField = !showRecipientField
+                                },
+                                leadingIcon = { Icon(Icons.Default.Person, contentDescription = null) }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Lock App") },
+                                onClick = {
+                                    showMenu = false
+                                    onLockClick()
+                                },
+                                leadingIcon = { Icon(Icons.Default.Lock, contentDescription = null) }
+                            )
+                        }
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = Color(0xFF1a1a2e)
                 )
             )
-        },
-        floatingActionButton = {
-            if (selfDestructSeconds > 0) {
-                FloatingActionButton(
-                    onClick = { showSelfDestructMenu = true },
-                    modifier = Modifier.size(56.dp),
-                    containerColor = Color(0xFF4CAF50),
-                    shape = CircleShape
-                ) {
-                    Text(
-                        text = "${selfDestructSeconds}s",
-                        color = Color.White,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-            }
         }
     ) { paddingValues ->
         Box(
@@ -903,21 +1056,77 @@ fun ChatScreen(
             Column(
                 modifier = Modifier.fillMaxSize()
             ) {
+                // Recipient field
+                if (showRecipientField) {
+                    OutlinedTextField(
+                        value = localRecipient,
+                        onValueChange = {
+                            localRecipient = it
+                            onRecipientChange(it)
+                        },
+                        label = { Text("Chatting with", color = Color(0xFF888888)) },
+                        placeholder = { Text("Enter recipient username", color = Color(0xFF555555)) },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 8.dp, vertical = 4.dp),
+                        colors = TextFieldDefaults.colors(
+                            focusedIndicatorColor = Color(0xFF4CAF50),
+                            unfocusedIndicatorColor = Color(0xFF333333),
+                            focusedTextColor = Color.White,
+                            unfocusedTextColor = Color.White,
+                            cursorColor = Color(0xFF4CAF50),
+                            focusedLabelColor = Color(0xFF4CAF50),
+                            unfocusedLabelColor = Color(0xFF888888)
+                        ),
+                        singleLine = true,
+                        textStyle = LocalTextStyle.current.copy(fontSize = 13.sp)
+                    )
+                }
+
                 // Messages List
-                LazyColumn(
-                    state = listState,
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxWidth(),
-                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
-                    reverseLayout = false
-                ) {
-                    items(messages, key = { it.id }) { message ->
-                        ChatBubble(
-                            message = message,
-                            currentUser = currentUser,
-                            onReveal = { onRevealMessage(message.id) }
-                        )
+                if (messages.isEmpty()) {
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth(),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Icon(
+                                Icons.Default.Lock,
+                                contentDescription = null,
+                                modifier = Modifier.size(64.dp),
+                                tint = Color(0xFF333333)
+                            )
+                            Spacer(modifier = Modifier.height(16.dp))
+                            Text(
+                                text = "No messages yet",
+                                color = Color(0xFF555555),
+                                fontSize = 16.sp
+                            )
+                            Text(
+                                text = "Start a secret conversation",
+                                color = Color(0xFF444444),
+                                fontSize = 13.sp
+                            )
+                        }
+                    }
+                } else {
+                    LazyColumn(
+                        state = listState,
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth(),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
+                        reverseLayout = false
+                    ) {
+                        items(messages, key = { it.id }) { message ->
+                            ChatBubble(
+                                message = message,
+                                currentUser = currentUser,
+                                onReveal = { onRevealMessage(message.id) }
+                            )
+                        }
                     }
                 }
 
@@ -930,15 +1139,12 @@ fun ChatScreen(
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 8.dp),
+                            .padding(horizontal = 16.dp, vertical = 4.dp),
                         horizontalArrangement = Arrangement.Start
                     ) {
                         Box(
                             modifier = Modifier
-                                .background(
-                                    color = Color(0xFF2C2C2E),
-                                    shape = RoundedCornerShape(16.dp)
-                                )
+                                .background(Color(0xFF2C2C2E), RoundedCornerShape(16.dp))
                                 .padding(horizontal = 12.dp, vertical = 8.dp)
                         ) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -976,29 +1182,36 @@ fun ChatScreen(
                 Card(
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
-                    colors = CardDefaults.cardColors(
-                        containerColor = Color(0xFF1e1e2e)
-                    )
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFF1e1e2e))
                 ) {
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                            .padding(horizontal = 8.dp, vertical = 6.dp),
                         verticalAlignment = Alignment.Bottom
                     ) {
-                        // Self-destruct quick select
+                        // Self-destruct toggle
                         IconButton(
                             onClick = { showSelfDestructMenu = true },
-                            modifier = Modifier.size(40.dp)
+                            modifier = Modifier.size(36.dp)
                         ) {
                             Icon(
                                 Icons.Default.Timer,
-                                contentDescription = "Self Destruct",
-                                tint = if (selfDestructSeconds > 0) Color(0xFF4CAF50) else Color(0xFF888888)
+                                contentDescription = null,
+                                tint = if (selfDestructSeconds > 0) Color(0xFF4CAF50) else Color(0xFF666666),
+                                modifier = Modifier.size(20.dp)
                             )
                         }
 
-                        // Message Input
+                        if (selfDestructSeconds > 0) {
+                            Text(
+                                text = "${selfDestructSeconds}s",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFF4CAF50)
+                            )
+                        }
+
                         OutlinedTextField(
                             value = messageText,
                             onValueChange = {
@@ -1015,14 +1228,11 @@ fun ChatScreen(
                             },
                             modifier = Modifier
                                 .weight(1f)
-                                .padding(horizontal = 8.dp),
+                                .padding(horizontal = 4.dp),
                             placeholder = {
-                                Text(
-                                    "Secret message...",
-                                    color = Color(0xFF888888)
-                                )
+                                Text("Secret message...", color = Color(0xFF666666))
                             },
-                            textStyle = LocalTextStyle.current.copy(color = Color.White),
+                            textStyle = LocalTextStyle.current.copy(color = Color.White, fontSize = 14.sp),
                             colors = TextFieldDefaults.colors(
                                 focusedIndicatorColor = Color(0xFF4CAF50),
                                 unfocusedIndicatorColor = Color(0xFF333333),
@@ -1031,13 +1241,12 @@ fun ChatScreen(
                                 cursorColor = Color(0xFF4CAF50)
                             ),
                             maxLines = 4,
-                            keyboardOptions = KeyboardOptions(
-                                imeAction = ImeAction.Send
-                            ),
+                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
                             keyboardActions = KeyboardActions(
                                 onSend = {
-                                    if (messageText.isNotBlank()) {
-                                        onSendMessage(messageText, selfDestructSeconds)
+                                    val recipient = localRecipient.ifEmpty { chatRecipient }
+                                    if (messageText.isNotBlank() && recipient.isNotBlank()) {
+                                        onSendMessage(messageText, recipient, selfDestructSeconds)
                                         messageText = ""
                                         focusManager.clearFocus()
                                     }
@@ -1045,30 +1254,30 @@ fun ChatScreen(
                             )
                         )
 
-                        // Send Button
-                        AnimatedVisibility(
-                            visible = messageText.isNotBlank(),
-                            enter = scaleIn() + fadeIn(),
-                            exit = scaleOut() + fadeOut()
-                        ) {
-                            FloatingActionButton(
-                                onClick = {
-                                    if (messageText.isNotBlank()) {
-                                        hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
-                                        onSendMessage(messageText, selfDestructSeconds)
-                                        messageText = ""
-                                        focusManager.clearFocus()
-                                    }
-                                },
-                                modifier = Modifier.size(48.dp),
-                                containerColor = Color(0xFF4CAF50),
-                                shape = CircleShape
-                            ) {
-                                Icon(
-                                    Icons.Default.Send,
-                                    contentDescription = "Send",
-                                    tint = Color.White
-                                )
+                        Box(modifier = Modifier.size(44.dp)) {
+                            if (messageText.isNotBlank()) {
+                                FloatingActionButton(
+                                    onClick = {
+                                        val recipient = localRecipient.ifEmpty { chatRecipient }
+                                        if (messageText.isNotBlank() && recipient.isNotBlank()) {
+                                            hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
+                                            onSendMessage(messageText, recipient, selfDestructSeconds)
+                                            messageText = ""
+                                            focusManager.clearFocus()
+                                        }
+                                    },
+                                    modifier = Modifier.size(44.dp),
+                                    containerColor = if (localRecipient.isNotEmpty() || chatRecipient.isNotEmpty())
+                                        Color(0xFF4CAF50) else Color(0xFF555555),
+                                    shape = CircleShape
+                                ) {
+                                    Icon(
+                                        Icons.Default.Send,
+                                        contentDescription = "Send",
+                                        tint = Color.White,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
                             }
                         }
                     }
@@ -1077,7 +1286,6 @@ fun ChatScreen(
         }
     }
 
-    // Self-destruct dialog
     if (showSelfDestructMenu) {
         SelfDestructPickerDialog(
             currentSeconds = selfDestructSeconds,

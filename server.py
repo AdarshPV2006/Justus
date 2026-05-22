@@ -500,10 +500,20 @@ class WebSocketServer:
             method = parts[0] if len(parts) > 0 else ''
             path = parts[1] if len(parts) > 1 else '/'
 
-            # Handle non-GET methods (HEAD requests from Render's load balancer)
-            if method != 'GET':
+            # Handle non-GET methods
+            if method == 'HEAD':
                 body = 'OK'
                 response = f"HTTP/1.1 200 OK\r\nContent-Length: {len(body)}\r\n\r\n{body}"
+                writer.write(response.encode())
+                await writer.drain()
+                writer.close()
+                return
+            elif method == 'POST':
+                await self._handle_post(writer, path, request_text)
+                return
+            elif method not in ('GET',):
+                body = 'Method Not Allowed'
+                response = f"HTTP/1.1 405 Method Not Allowed\r\nContent-Length: {len(body)}\r\n\r\n{body}"
                 writer.write(response.encode())
                 await writer.drain()
                 writer.close()
@@ -544,9 +554,58 @@ class WebSocketServer:
                 writer.close()
             except Exception:
                 pass
-    
+
+    async def _handle_post(self, writer, path: str, request_text: str):
+        """Handle POST requests to the REST API"""
+        try:
+            body_start = request_text.find('\r\n\r\n')
+            if body_start == -1:
+                body = json.dumps({'success': False, 'error': 'Bad request'})
+                response = f"HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {len(body)}\r\n\r\n{body}"
+                writer.write(response.encode())
+                await writer.drain()
+                writer.close()
+                return
+
+            body_json = json.loads(request_text[body_start + 4:])
+
+            if path == '/api/register':
+                result = await self.auth_manager.register_user(
+                    body_json.get('username', ''),
+                    body_json.get('password', ''),
+                    body_json.get('public_key', '')
+                )
+            elif path == '/api/login':
+                result = await self.auth_manager.login_user(
+                    body_json.get('username', ''),
+                    body_json.get('password', '')
+                )
+            else:
+                result = {'success': False, 'error': 'Not found'}
+
+            status = 200 if result.get('success') else 400
+            body = json.dumps(result)
+            response = f"HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nContent-Length: {len(body)}\r\n\r\n{body}"
+            writer.write(response.encode())
+            await writer.drain()
+        except json.JSONDecodeError:
+            body = json.dumps({'success': False, 'error': 'Invalid JSON'})
+            response = f"HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {len(body)}\r\n\r\n{body}"
+            writer.write(response.encode())
+            await writer.drain()
+        except Exception as e:
+            logger.error(f"POST handler error: {e}")
+            body = json.dumps({'success': False, 'error': 'Internal error'})
+            response = f"HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: {len(body)}\r\n\r\n{body}"
+            writer.write(response.encode())
+            await writer.drain()
+        finally:
+            writer.close()
+
     async def process_request(self, path, request_headers):
         return None  # All request handling is in handle_connection now
+
+    async def handler(self, websocket, path: str):
         """Handle WebSocket connections"""
         client_ip = websocket.remote_address[0]
         
