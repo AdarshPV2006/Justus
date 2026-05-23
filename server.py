@@ -317,6 +317,22 @@ class DatabaseManager:
                 (hashlib.sha256(pin.encode()).hexdigest(), username)
             )
     
+    def delete_user(self, username: str):
+        """Delete user and all associated data"""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("DELETE FROM messages WHERE sender = ? OR recipient = ?", (username, username))
+            conn.execute("DELETE FROM sessions WHERE username = ?", (username,))
+            conn.execute("DELETE FROM active_connections WHERE username = ?", (username,))
+            conn.execute("DELETE FROM users WHERE username = ?", (username,))
+    
+    def update_password(self, username: str, new_password_hash: str):
+        """Update user's password hash"""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "UPDATE users SET password_hash = ? WHERE username = ?",
+                (new_password_hash, username)
+            )
+    
     def verify_decoy_pin(self, username: str, pin: str) -> bool:
         """Verify decoy mode PIN"""
         with sqlite3.connect(self.db_path) as conn:
@@ -432,6 +448,36 @@ class AuthManager:
             'username': username,
             'public_key': user.public_key
         }
+    
+    async def delete_user(self, token: str, password: str) -> dict:
+        """Delete user account — requires auth token + password confirmation"""
+        username = self.verify_token(token)
+        if not username:
+            return {'success': False, 'error': 'Invalid or expired token'}
+        user = self.db.get_user(username)
+        if not user:
+            return {'success': False, 'error': 'User not found'}
+        if not self.verify_password(password, user.password_hash):
+            return {'success': False, 'error': 'Invalid password'}
+        self.db.delete_user(username)
+        return {'success': True}
+    
+    async def reset_password(self, token: str, old_password: str, new_password: str) -> dict:
+        """Reset password — requires auth token + old password"""
+        username = self.verify_token(token)
+        if not username:
+            return {'success': False, 'error': 'Invalid or expired token'}
+        user = self.db.get_user(username)
+        if not user:
+            return {'success': False, 'error': 'User not found'}
+        if not self.verify_password(old_password, user.password_hash):
+            return {'success': False, 'error': 'Invalid current password'}
+        if len(new_password) < 6:
+            return {'success': False, 'error': 'New password must be at least 6 characters'}
+        new_hash = self.hash_password(new_password)
+        self.db.update_password(username, new_hash)
+        return {'success': True}
+
 
 # ===============================
 # MESSAGE PROCESSOR
@@ -579,6 +625,17 @@ class WebSocketServer:
                 result = await self.auth_manager.login_user(
                     body_json.get('username', ''),
                     body_json.get('password', '')
+                )
+            elif path == '/api/delete_user':
+                result = await self.auth_manager.delete_user(
+                    body_json.get('token', ''),
+                    body_json.get('password', '')
+                )
+            elif path == '/api/reset_password':
+                result = await self.auth_manager.reset_password(
+                    body_json.get('token', ''),
+                    body_json.get('old_password', ''),
+                    body_json.get('new_password', '')
                 )
             else:
                 result = {'success': False, 'error': 'Not found'}
