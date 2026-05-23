@@ -5,15 +5,16 @@ import asyncio
 import json
 import hashlib
 import secrets
+import base64
 import sqlite3
 import os
+import struct
 from datetime import datetime, timedelta
-from typing import Dict, Optional, Any, List
+from typing import Dict, Optional, Any, List, Callable
 from dataclasses import dataclass
 import logging
 
 import asyncpg
-from websockets.exceptions import ConnectionClosed
 import bcrypt
 import jwt
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -649,20 +650,19 @@ class MessageProcessor:
             self_destruct_seconds=self_destruct
         )
     
-    async def process_undelivered_messages(self, username: str, websocket):
+    async def process_undelivered_messages(self, username: str, ws_server: 'WebSocketServer'):
         """Send undelivered messages to user"""
         messages = await self.db.get_undelivered_messages(username)
         for msg in messages:
             try:
-                await websocket.send(json.dumps({
+                await ws_server.send_to_user(username, {
                     'type': 'message',
                     'id': msg['id'],
                     'content': msg['content_encrypted'],
                     'sender': msg['sender'],
                     'timestamp': msg['timestamp'],
                     'self_destruct': msg['self_destruct_seconds']
-                }))
-                # Update status to delivered
+                })
                 await self.db.update_message_status(msg['id'], 'delivered')
             except Exception as e:
                 logger.error(f"Error sending undelivered message: {e}")
@@ -670,8 +670,64 @@ class MessageProcessor:
 
 
 # ===============================
-# WEBSOCKET SERVER
+# WEB SOCKET SERVER
 # ===============================
+
+WEBSOCKET_MAGIC = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+def _compute_accept_key(key: str) -> str:
+    return base64.b64encode(hashlib.sha1((key + WEBSOCKET_MAGIC).encode()).digest()).decode()
+
+async def _read_ws_frame(reader: asyncio.StreamReader) -> tuple[int, bytes]:
+    """Read a WebSocket frame. Returns (opcode, payload)."""
+    b1, b2 = struct.unpack('!BB', await reader.readexactly(2))
+    opcode = b1 & 0x0F
+    masked = (b2 >> 7) & 1
+    length = b2 & 0x7F
+    if length == 126:
+        length = struct.unpack('!H', await reader.readexactly(2))[0]
+    elif length == 127:
+        length = struct.unpack('!Q', await reader.readexactly(8))[0]
+    mask = await reader.readexactly(4) if masked else None
+    payload = await reader.readexactly(length)
+    if mask:
+        payload = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+    return opcode, payload
+
+async def _write_ws_frame(writer: asyncio.StreamWriter, payload: bytes, opcode: int = 0x1):
+    """Send a WebSocket frame (unmasked, server->client)."""
+    header = bytearray()
+    header.append(0x80 | opcode)
+    length = len(payload)
+    if length < 126:
+        header.append(length)
+    elif length < 65536:
+        header.append(126)
+        header.extend(struct.pack('!H', length))
+    else:
+        header.append(127)
+        header.extend(struct.pack('!Q', length))
+    writer.write(bytes(header) + payload)
+    await writer.drain()
+
+def _parse_http_request(request_text: str) -> tuple:
+    """Parse HTTP request. Returns (method, path, headers_dict, body)."""
+    lines = request_text.split('\r\n')
+    first_line = lines[0] if lines else ''
+    parts = first_line.split(' ') if first_line else []
+    method = parts[0] if len(parts) > 0 else ''
+    path = parts[1] if len(parts) > 1 else '/'
+    headers: Dict[str, str] = {}
+    body = ''
+    i = 1
+    while i < len(lines) and lines[i] != '':
+        if ':' in lines[i]:
+            key, val = lines[i].split(':', 1)
+            headers[key.strip().lower()] = val.strip()
+        i += 1
+    if i + 1 < len(lines):
+        body = '\r\n'.join(lines[i + 1:])
+    return method, path, headers, body
 
 class WebSocketServer:
     def __init__(self, auth_manager: AuthManager, db: DatabaseManager, message_processor: MessageProcessor):
@@ -679,69 +735,66 @@ class WebSocketServer:
         self.db = db
         self.message_processor = message_processor
         self.connections: Dict[str, Any] = {}
+        self.connection_writers: Dict[str, asyncio.StreamWriter] = {}
         self.typing_status: Dict[str, TypingStatus] = {}
         self.ip_connections: Dict[str, int] = {}
     
     async def handle_connection(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         """Handle both HTTP and WebSocket connections on the same port"""
         try:
-            data = await reader.read(4096)
+            data = await reader.read(8192)
             if not data:
                 return
             request_text = data.decode('utf-8', errors='replace')
-            lines = request_text.split('\r\n')
-            first_line = lines[0] if lines else ''
-            parts = first_line.split(' ') if first_line else []
-            method = parts[0] if len(parts) > 0 else ''
-            path = parts[1] if len(parts) > 1 else '/'
+            method, path, headers, body = _parse_http_request(request_text)
 
-            # Handle non-GET methods
+            # Handle non-WebSocket methods
             if method == 'HEAD':
-                body = 'OK'
-                response = f"HTTP/1.1 200 OK\r\nContent-Length: {len(body)}\r\n\r\n{body}"
-                writer.write(response.encode())
+                resp = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK"
+                writer.write(resp.encode())
                 await writer.drain()
                 writer.close()
                 return
             elif method == 'POST':
-                await self._handle_post(writer, path, request_text)
+                await self._handle_post(writer, path, body)
                 return
             elif method not in ('GET',):
-                body = 'Method Not Allowed'
-                response = f"HTTP/1.1 405 Method Not Allowed\r\nContent-Length: {len(body)}\r\n\r\n{body}"
-                writer.write(response.encode())
+                resp = "HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 18\r\n\r\nMethod Not Allowed"
+                writer.write(resp.encode())
                 await writer.drain()
                 writer.close()
                 return
 
-            # Handle HTTP API endpoints (non-WebSocket GET)
-            is_ws = 'upgrade: websocket' in request_text.lower()
-            if not is_ws:
-                if path == '/api/health':
-                    body = json.dumps({'status': 'healthy', 'timestamp': datetime.now().isoformat()})
-                    response = f"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {len(body)}\r\n\r\n{body}"
-                    writer.write(response.encode())
-                    await writer.drain()
-                else:
-                    body = json.dumps({'error': 'Not found'})
-                    response = f"HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: {len(body)}\r\n\r\n{body}"
-                    writer.write(response.encode())
-                    await writer.drain()
-                writer.close()
+            # WebSocket upgrade
+            is_ws = headers.get('upgrade', '').lower() == 'websocket'
+            if is_ws:
+                ws_key = headers.get('sec-websocket-key', '')
+                if not ws_key:
+                    writer.close()
+                    return
+                accept = _compute_accept_key(ws_key)
+                resp = (
+                    f"HTTP/1.1 101 Switching Protocols\r\n"
+                    f"Upgrade: websocket\r\n"
+                    f"Connection: Upgrade\r\n"
+                    f"Sec-WebSocket-Accept: {accept}\r\n"
+                    f"\r\n"
+                )
+                writer.write(resp.encode())
+                await writer.drain()
+                await self._ws_handler(reader, writer, path)
                 return
 
-            # WebSocket connection - put data back and let websockets handle
-            reader.feed_data(data)
-            from websockets.asyncio.server import ServerConnection
-            conn = ServerConnection(
-                reader=reader,
-                writer=writer,
-                max_size=Config.MAX_MESSAGE_SIZE,
-                ping_interval=20,
-                ping_timeout=60,
-            )
-            await conn.handshake()
-            await self.handler(conn, path)
+            # Plain HTTP GET (non-WebSocket)
+            if path == '/api/health':
+                body = json.dumps({'status': 'healthy', 'timestamp': datetime.now().isoformat()})
+                resp = f"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {len(body)}\r\n\r\n{body}"
+            else:
+                body = json.dumps({'error': 'Not found'})
+                resp = f"HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: {len(body)}\r\n\r\n{body}"
+            writer.write(resp.encode())
+            await writer.drain()
+            writer.close()
 
         except Exception as e:
             logger.debug(f"Connection handler error: {e}")
@@ -750,19 +803,10 @@ class WebSocketServer:
             except Exception:
                 pass
 
-    async def _handle_post(self, writer, path: str, request_text: str):
+    async def _handle_post(self, writer: asyncio.StreamWriter, path: str, body: str):
         """Handle POST requests to the REST API"""
         try:
-            body_start = request_text.find('\r\n\r\n')
-            if body_start == -1:
-                body = json.dumps({'success': False, 'error': 'Bad request'})
-                response = f"HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {len(body)}\r\n\r\n{body}"
-                writer.write(response.encode())
-                await writer.drain()
-                writer.close()
-                return
-
-            body_json = json.loads(request_text[body_start + 4:])
+            body_json = json.loads(body) if body else {}
 
             if path == '/api/register':
                 result = await self.auth_manager.register_user(
@@ -790,51 +834,47 @@ class WebSocketServer:
                 result = {'success': False, 'error': 'Not found'}
 
             status = 200 if result.get('success') else 400
-            body = json.dumps(result)
-            response = f"HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nContent-Length: {len(body)}\r\n\r\n{body}"
-            writer.write(response.encode())
+            resp_body = json.dumps(result)
+            resp = f"HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nContent-Length: {len(resp_body)}\r\n\r\n{resp_body}"
+            writer.write(resp.encode())
             await writer.drain()
         except json.JSONDecodeError:
-            body = json.dumps({'success': False, 'error': 'Invalid JSON'})
-            response = f"HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {len(body)}\r\n\r\n{body}"
-            writer.write(response.encode())
+            resp_body = json.dumps({'success': False, 'error': 'Invalid JSON'})
+            resp = f"HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {len(resp_body)}\r\n\r\n{resp_body}"
+            writer.write(resp.encode())
             await writer.drain()
         except Exception as e:
             logger.error(f"POST handler error: {e}")
-            body = json.dumps({'success': False, 'error': 'Internal error'})
-            response = f"HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: {len(body)}\r\n\r\n{body}"
-            writer.write(response.encode())
+            resp_body = json.dumps({'success': False, 'error': 'Internal error'})
+            resp = f"HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: {len(resp_body)}\r\n\r\n{resp_body}"
+            writer.write(resp.encode())
             await writer.drain()
         finally:
             writer.close()
 
-    async def process_request(self, path, request_headers):
-        return None  # All request handling is in handle_connection now
-
-    async def handler(self, websocket, path: str):
-        """Handle WebSocket connections"""
-        client_ip = websocket.remote_address[0]
+    async def _ws_handler(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, path: str):
+        """Handle WebSocket messages"""
+        client_ip = writer.get_extra_info('peername', ('0.0.0.0', 0))[0]
         
         # Rate limit by IP
         if self.ip_connections.get(client_ip, 0) >= Config.MAX_CONNECTIONS_PER_IP:
             logger.warning(f"Too many connections from IP: {client_ip}")
-            await websocket.close(1008, "Too many connections")
+            await _write_ws_frame(writer, b'Too many connections', 0x8)
+            writer.close()
             return
         
         # Authenticate
         token = None
         username = None
-        
-        # Get token from query string
         if '?' in path:
             query = path.split('?', 1)[1]
-            params = dict(param.split('=') for param in query.split('&') if '=' in param)
+            params = dict(p.split('=') for p in query.split('&') if '=' in p)
             token = params.get('token')
             username = params.get('user')
         
-        # Validate token
         if not token or not username:
-            await websocket.close(1008, "Authentication required")
+            await _write_ws_frame(writer, b'Authentication required', 0x8)
+            writer.close()
             return
         
         # Verify session — try DB first, fall back to JWT
@@ -842,44 +882,61 @@ class WebSocketServer:
         if not stored_username:
             stored_username = self.auth_manager.verify_token(token)
         if not stored_username or stored_username != username:
-            await websocket.close(1008, "Invalid session")
+            await _write_ws_frame(writer, b'Invalid session', 0x8)
+            writer.close()
             return
         
         # Check if user is already connected
         if username in self.connections:
             logger.warning(f"User already connected: {username}")
-            await websocket.close(1008, "Already connected")
+            await _write_ws_frame(writer, b'Already connected', 0x8)
+            writer.close()
             return
         
         # Add connection
-        self.connections[username] = websocket
+        self.connections[username] = True
+        self.connection_writers[username] = writer
         self.ip_connections[client_ip] = self.ip_connections.get(client_ip, 0) + 1
         await self.db.update_last_seen(username)
         
         logger.info(f"User connected: {username} from {client_ip}")
         
         # Send undelivered messages
-        await self.message_processor.process_undelivered_messages(username, websocket)
+        await self.message_processor.process_undelivered_messages(username, self)
         
         # Notify friends that user is online
         await self.broadcast_status(username, "online")
         
         try:
-            async for message in websocket:
-                await self.process_message(username, message)
-                
-        except ConnectionClosed:
-            logger.info(f"User disconnected: {username}")
+            while True:
+                opcode, payload = await _read_ws_frame(reader)
+                if opcode == 0x8:  # close
+                    break
+                elif opcode == 0x9:  # ping
+                    await _write_ws_frame(writer, payload, 0xA)
+                elif opcode == 0x1:  # text
+                    await self.process_message(username, payload.decode())
+                # binary frames (0x2) are ignored
+        except (asyncio.IncompleteReadError, ConnectionResetError, ConnectionError):
+            pass
         except Exception as e:
             logger.error(f"Error handling user {username}: {e}")
         finally:
-            # Cleanup
             self.connections.pop(username, None)
+            self.connection_writers.pop(username, None)
             self.ip_connections[client_ip] = max(0, self.ip_connections.get(client_ip, 0) - 1)
             self.typing_status.pop(username, None)
-            
-            # Notify friends that user is offline
             await self.broadcast_status(username, "offline")
+    
+    async def send_to_user(self, username: str, data: dict):
+        """Send JSON data to a specific user via WebSocket"""
+        writer = self.connection_writers.get(username)
+        if writer:
+            try:
+                payload = json.dumps(data).encode()
+                await _write_ws_frame(writer, payload, 0x1)
+            except Exception as e:
+                logger.error(f"Error sending to {username}: {e}")
     
     async def process_message(self, sender: str, message: str):
         """Process incoming WebSocket message"""
@@ -898,7 +955,7 @@ class WebSocketServer:
             elif msg_type == 'key_exchange':
                 await self.handle_key_exchange(sender, data)
             elif msg_type == 'ping':
-                await self.handle_ping(sender, data)
+                await self.handle_ping(sender)
             else:
                 logger.warning(f"Unknown message type from {sender}: {msg_type}")
                 
@@ -924,26 +981,83 @@ class WebSocketServer:
         # Send to recipient if online
         if recipient in self.connections:
             try:
-                await self.connections[recipient].send(json.dumps({
+                await self.send_to_user(recipient, {
                     'type': 'message',
                     'id': message.id,
                     'content': content,
                     'sender': sender,
                     'timestamp': message.timestamp.isoformat(),
                     'self_destruct': self_destruct
-                }))
+                })
                 # Update status to delivered
                 await self.db.update_message_status(message.id, 'delivered')
                 
                 # Send delivery receipt to sender
                 if sender in self.connections:
-                    await self.connections[sender].send(json.dumps({
+                    await self.send_to_user(sender, {
                         'type': 'delivered',
                         'messageId': message.id
-                    }))
+                    })
             except Exception as e:
                 logger.error(f"Error sending message to {recipient}: {e}")
     
+    async def handle_typing_indicator(self, sender: str, data: dict):
+        """Handle typing indicator"""
+        is_typing = data.get('isTyping', False)
+        self.typing_status[sender] = TypingStatus(
+            username=sender,
+            is_typing=is_typing,
+            last_update=datetime.now()
+        )
+        for user in list(self.connections.keys()):
+            if user != sender:
+                await self.send_to_user(user, {
+                    'type': 'typing',
+                    'sender': sender,
+                    'isTyping': is_typing
+                })
+    
+    async def handle_delivery_receipt(self, data: dict):
+        """Handle delivery receipt"""
+        message_id = data.get('messageId')
+        if message_id:
+            await self.db.update_message_status(message_id, 'delivered')
+    
+    async def handle_read_receipt(self, data: dict):
+        """Handle read receipt"""
+        message_id = data.get('messageId')
+        if message_id:
+            await self.db.update_message_status(message_id, 'read')
+    
+    async def handle_key_exchange(self, sender: str, data: dict):
+        """Handle encryption key exchange"""
+        recipient = data.get('recipient')
+        public_key = data.get('publicKey')
+        if recipient and public_key and recipient in self.connections:
+            await self.send_to_user(recipient, {
+                'type': 'key_exchange',
+                'sender': sender,
+                'publicKey': public_key
+            })
+    
+    async def handle_ping(self, sender: str):
+        """Handle ping/pong for connection health"""
+        if sender in self.connections:
+            await self.send_to_user(sender, {
+                'type': 'pong',
+                'timestamp': datetime.now().isoformat()
+            })
+    
+    async def broadcast_status(self, username: str, status: str):
+        """Broadcast user online/offline status"""
+        for user in list(self.connections.keys()):
+            if user != username:
+                await self.send_to_user(user, {
+                    'type': 'status',
+                    'user': username,
+                    'status': status
+                })
+
     async def handle_typing_indicator(self, sender: str, data: dict):
         """Handle typing indicator"""
         is_typing = data.get('isTyping', False)
@@ -982,40 +1096,7 @@ class WebSocketServer:
             # Forward read receipt to sender
             # (You'd need to know who the sender is from the message)
             pass
-    
-    async def handle_key_exchange(self, sender: str, data: dict):
-        """Handle encryption key exchange"""
-        recipient = data.get('recipient')
-        public_key = data.get('publicKey')
-        
-        if recipient and public_key and recipient in self.connections:
-            await self.connections[recipient].send(json.dumps({
-                'type': 'key_exchange',
-                'sender': sender,
-                'publicKey': public_key
-            }))
-    
-    async def handle_ping(self, sender: str, data: dict):
-        """Handle ping/pong for connection health"""
-        if sender in self.connections:
-            await self.connections[sender].send(json.dumps({
-                'type': 'pong',
-                'timestamp': datetime.now().isoformat()
-            }))
-    
-    async def broadcast_status(self, username: str, status: str):
-        """Broadcast user online/offline status"""
-        for user, ws in self.connections.items():
-            if user != username:
-                try:
-                    await ws.send(json.dumps({
-                        'type': 'status',
-                        'user': username,
-                        'status': status
-                    }))
-                except Exception as e:
-                    logger.error(f"Error broadcasting status: {e}")
-    
+
     async def cleanup_typing_indicators(self):
         """Remove stale typing indicators"""
         while True:
@@ -1028,13 +1109,13 @@ class WebSocketServer:
             
             for username in to_remove:
                 del self.typing_status[username]
-                # Broadcast that user stopped typing
-                for ws in self.connections.values():
-                    await ws.send(json.dumps({
-                        'type': 'typing',
-                        'sender': username,
-                        'isTyping': False
-                    }))
+                for user in list(self.connections.keys()):
+                    if user != username:
+                        await self.send_to_user(user, {
+                            'type': 'typing',
+                            'sender': username,
+                            'isTyping': False
+                        })
 
 # ===============================
 # MAIN SERVER
