@@ -46,7 +46,9 @@ import androidx.compose.ui.graphics.*
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.focus.FocusManager
 import androidx.compose.ui.graphics.*
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -783,7 +785,8 @@ fun LoginScreen(
 
                                 // Run in background thread
                                 val prefs = context.getSharedPreferences("JustUsSecure", Context.MODE_PRIVATE)
-                                CoroutineScope(Dispatchers.IO).launch {
+                                val scope = rememberCoroutineScope()
+                                scope.launch(Dispatchers.IO) {
                                     try {
                                         val response = okHttpClient.newCall(request).execute()
                                         val responseBody = response.body?.string() ?: "{}"
@@ -1002,8 +1005,7 @@ fun ChatScreen(
                         }
                         DropdownMenu(
                             expanded = showMenu,
-                            onDismissRequest = { showMenu = false },
-                            tonalElevation = 8.dp
+                            onDismissRequest = { showMenu = false }
                         ) {
                             DropdownMenuItem(
                                 text = { Text("Set Recipient") },
