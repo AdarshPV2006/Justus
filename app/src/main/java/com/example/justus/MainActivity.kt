@@ -527,6 +527,7 @@ fun LoginScreen(
     var errorMessage by remember { mutableStateOf<String?>(null) }
     var showUrlField by remember { mutableStateOf(false) }
     var localServerUrl by remember { mutableStateOf(serverUrl) }
+    val scope = rememberCoroutineScope()
 
     val context = LocalContext.current
     val focusManager = LocalFocusManager.current
@@ -785,7 +786,6 @@ fun LoginScreen(
 
                                 // Run in background thread
                                 val prefs = context.getSharedPreferences("JustUsSecure", Context.MODE_PRIVATE)
-                                val scope = rememberCoroutineScope()
                                 scope.launch(Dispatchers.IO) {
                                     try {
                                         val response = okHttpClient.newCall(request).execute()
