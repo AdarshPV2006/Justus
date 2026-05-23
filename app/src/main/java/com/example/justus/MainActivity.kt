@@ -180,7 +180,7 @@ class EncryptionManager {
 // ===============================
 
 class WebSocketManager(
-    private val onMessage: (String, String) -> Unit,
+    private val onMessage: (String, String, String, Long, Int) -> Unit,
     private val onTyping: (String, Boolean) -> Unit,
     private val onStatusUpdate: (String, MessageStatus) -> Unit,
     private val onConnectionChange: (ConnectionState) -> Unit,
@@ -196,6 +196,7 @@ class WebSocketManager(
     private var serverUrl = ""
     private var publicKeyBase64 = ""
     private var isReconnecting = false
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     fun connect(username: String, token: String, url: String, pubKey: String = "") {
         currentUser = username
@@ -208,16 +209,17 @@ class WebSocketManager(
 
         webSocket = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
-                onConnectionChange(ConnectionState.CONNECTED)
-                isReconnecting = false
-                // Broadcast public key for key exchange
-                if (publicKeyBase64.isNotEmpty()) {
-                    val keyMsg = JSONObject().apply {
-                        put("type", "key_exchange")
-                        put("sender", currentUser)
-                        put("publicKey", publicKeyBase64)
+                mainHandler.post {
+                    onConnectionChange(ConnectionState.CONNECTED)
+                    isReconnecting = false
+                    if (publicKeyBase64.isNotEmpty()) {
+                        val keyMsg = JSONObject().apply {
+                            put("type", "key_exchange")
+                            put("sender", currentUser)
+                            put("publicKey", publicKeyBase64)
+                        }
+                        webSocket.send(keyMsg.toString())
                     }
-                    webSocket.send(keyMsg.toString())
                 }
             }
 
@@ -227,42 +229,49 @@ class WebSocketManager(
                     "message" -> {
                         val content = json.getString("content")
                         val sender = json.getString("sender")
-                        onMessage(content, sender)
+                        val msgId = json.optString("id", UUID.randomUUID().toString())
+                        val timestamp = json.optLong("timestamp", System.currentTimeMillis())
+                        val selfDestruct = json.optInt("self_destruct", 0)
+                        mainHandler.post { onMessage(content, sender, msgId, timestamp, selfDestruct) }
                     }
                     "typing" -> {
                         val sender = json.getString("sender")
                         val isTyping = json.getBoolean("isTyping")
-                        onTyping(sender, isTyping)
+                        mainHandler.post { onTyping(sender, isTyping) }
                     }
                     "delivered" -> {
                         val messageId = json.optString("messageId", "")
                         if (messageId.isNotEmpty()) {
-                            onStatusUpdate(messageId, MessageStatus.DELIVERED)
+                            mainHandler.post { onStatusUpdate(messageId, MessageStatus.DELIVERED) }
                         }
                     }
                     "read" -> {
                         val messageId = json.optString("messageId", "")
                         if (messageId.isNotEmpty()) {
-                            onStatusUpdate(messageId, MessageStatus.READ)
+                            mainHandler.post { onStatusUpdate(messageId, MessageStatus.READ) }
                         }
                     }
                     "key_exchange" -> {
                         val sender = json.getString("sender")
                         val pubKeyB64 = json.getString("publicKey")
                         val pubKeyBytes = Base64.getDecoder().decode(pubKeyB64)
-                        onKeyExchange(sender, pubKeyBytes)
+                        mainHandler.post { onKeyExchange(sender, pubKeyBytes) }
                     }
                 }
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                onConnectionChange(ConnectionState.DISCONNECTED)
-                attemptReconnect()
+                mainHandler.post {
+                    onConnectionChange(ConnectionState.DISCONNECTED)
+                    attemptReconnect()
+                }
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                onConnectionChange(ConnectionState.DISCONNECTED)
-                attemptReconnect()
+                mainHandler.post {
+                    onConnectionChange(ConnectionState.DISCONNECTED)
+                    attemptReconnect()
+                }
             }
         })
     }
@@ -407,20 +416,25 @@ class MainActivity : AppCompatActivity() {
 
     private fun initializeChat(username: String, token: String, url: String) {
         webSocketManager = WebSocketManager(
-            onMessage = { encryptedContent, sender ->
+            onMessage = { encryptedContent, sender, msgId, timestamp, selfDestruct ->
                 val decrypted = encryptionManager.decryptMessage(encryptedContent)
+                // Skip duplicates from reconnection
+                if (messages.any { it.id == msgId }) return@WebSocketManager
                 val message = ChatMessage(
-                    id = UUID.randomUUID().toString(),
+                    id = msgId,
                     text = decrypted,
                     sender = sender,
                     isSent = false,
-                    timestamp = System.currentTimeMillis(),
+                    timestamp = timestamp,
                     status = MessageStatus.DELIVERED,
-                    selfDestructSeconds = 0,
+                    selfDestructSeconds = selfDestruct,
                     isBlurred = true
                 )
                 messages.add(message)
-                webSocketManager?.sendDeliveryReceipt(message.id)
+                webSocketManager?.sendDeliveryReceipt(msgId)
+                if (selfDestruct > 0) {
+                    startSelfDestructTimer(msgId, selfDestruct)
+                }
             },
             onTyping = { sender, isTyping ->
                 // Handle typing indicator in UI
