@@ -8,10 +8,11 @@ import secrets
 import sqlite3
 import os
 from datetime import datetime, timedelta
-from typing import Dict, Optional, Any
+from typing import Dict, Optional, Any, List
 from dataclasses import dataclass
 import logging
 
+import asyncpg
 from websockets.exceptions import ConnectionClosed
 import bcrypt
 import jwt
@@ -58,6 +59,7 @@ class Config:
     SELF_DESTRUCT_OPTIONS = [5, 10, 30, 60, 300]
     
     # Database
+    DATABASE_URL = os.environ.get("DATABASE_URL", "")
     DATABASE_PATH = "justus.db"
 
 # ===============================
@@ -104,15 +106,66 @@ class TypingStatus:
 # ===============================
 
 class DatabaseManager:
-    def __init__(self, db_path: str):
-        self.db_path = db_path
-        self.init_database()
+    def __init__(self, db_url_or_path: str):
+        self._conn_string = db_url_or_path if (db_url_or_path and db_url_or_path.startswith(('postgres://', 'postgresql://'))) else None
+        self.db_path = db_url_or_path if not self._conn_string else None
+        self._pool = None
     
-    def init_database(self):
-        """Initialize database tables"""
+    @property
+    def is_postgres(self) -> bool:
+        return self._conn_string is not None
+    
+    async def init_db(self):
+        if self.is_postgres:
+            self._pool = await asyncpg.create_pool(self._conn_string, min_size=1, max_size=5)
+            async with self._pool.acquire() as conn:
+                await conn.execute("""
+                    CREATE TABLE IF NOT EXISTS users (
+                        username TEXT PRIMARY KEY,
+                        password_hash TEXT NOT NULL,
+                        public_key TEXT NOT NULL,
+                        created_at TIMESTAMP NOT NULL,
+                        last_seen TIMESTAMP NOT NULL,
+                        is_active BOOLEAN DEFAULT TRUE,
+                        decoy_pin TEXT
+                    );
+                    CREATE TABLE IF NOT EXISTS messages (
+                        id TEXT PRIMARY KEY,
+                        sender TEXT NOT NULL,
+                        recipient TEXT NOT NULL,
+                        content_encrypted TEXT NOT NULL,
+                        timestamp TIMESTAMP NOT NULL,
+                        status TEXT DEFAULT 'sent',
+                        self_destruct_seconds INTEGER DEFAULT 0,
+                        deleted_at TIMESTAMP
+                    );
+                    CREATE TABLE IF NOT EXISTS sessions (
+                        token TEXT PRIMARY KEY,
+                        username TEXT NOT NULL,
+                        created_at TIMESTAMP NOT NULL,
+                        expires_at TIMESTAMP NOT NULL,
+                        ip_address TEXT
+                    );
+                    CREATE TABLE IF NOT EXISTS active_connections (
+                        username TEXT PRIMARY KEY,
+                        connected_at TIMESTAMP NOT NULL,
+                        last_heartbeat TIMESTAMP NOT NULL
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_messages_recipient ON messages(recipient);
+                    CREATE INDEX IF NOT EXISTS idx_messages_sender ON messages(sender);
+                    CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);
+                    CREATE INDEX IF NOT EXISTS idx_sessions_username ON sessions(username);
+                    CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
+                """)
+        else:
+            await asyncio.to_thread(self._init_sqlite_sync)
+        logger.info("Database initialized successfully")
+    
+    # ---- SQLite sync helpers ----
+    
+    def _init_sqlite_sync(self):
         with sqlite3.connect(self.db_path) as conn:
             conn.executescript("""
-                -- Users table
                 CREATE TABLE IF NOT EXISTS users (
                     username TEXT PRIMARY KEY,
                     password_hash TEXT NOT NULL,
@@ -122,8 +175,6 @@ class DatabaseManager:
                     is_active BOOLEAN DEFAULT 1,
                     decoy_pin TEXT
                 );
-                
-                -- Messages table
                 CREATE TABLE IF NOT EXISTS messages (
                     id TEXT PRIMARY KEY,
                     sender TEXT NOT NULL,
@@ -136,8 +187,6 @@ class DatabaseManager:
                     FOREIGN KEY (sender) REFERENCES users(username),
                     FOREIGN KEY (recipient) REFERENCES users(username)
                 );
-                
-                -- Sessions table
                 CREATE TABLE IF NOT EXISTS sessions (
                     token TEXT PRIMARY KEY,
                     username TEXT NOT NULL,
@@ -146,22 +195,16 @@ class DatabaseManager:
                     ip_address TEXT,
                     FOREIGN KEY (username) REFERENCES users(username)
                 );
-                
-                -- Active connections (in-memory, but we'll persist for recovery)
                 CREATE TABLE IF NOT EXISTS active_connections (
                     username TEXT PRIMARY KEY,
                     connected_at TIMESTAMP NOT NULL,
                     last_heartbeat TIMESTAMP NOT NULL
                 );
-                
-                -- Indexes
                 CREATE INDEX IF NOT EXISTS idx_messages_recipient ON messages(recipient);
                 CREATE INDEX IF NOT EXISTS idx_messages_sender ON messages(sender);
                 CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);
                 CREATE INDEX IF NOT EXISTS idx_sessions_username ON sessions(username);
                 CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
-                
-                -- Cleanup old messages trigger
                 CREATE TRIGGER IF NOT EXISTS cleanup_old_messages
                 AFTER INSERT ON messages
                 BEGIN
@@ -169,31 +212,69 @@ class DatabaseManager:
                     WHERE julianday('now') - julianday(timestamp) > 7;
                 END;
             """)
-            logger.info("Database initialized successfully")
     
-    def create_user(self, user: User) -> bool:
-        """Create a new user"""
-        try:
-            with sqlite3.connect(self.db_path) as conn:
-                conn.execute(
+    def _sqlite_execute(self, sql: str, params: tuple = ()):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(sql, params)
+    
+    def _sqlite_fetchone(self, sql: str, params: tuple = ()) -> Optional[sqlite3.Row]:
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            return conn.execute(sql, params).fetchone()
+    
+    def _sqlite_fetchall(self, sql: str, params: tuple = ()) -> List[sqlite3.Row]:
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            return conn.execute(sql, params).fetchall()
+    
+    # ---- User operations ----
+    
+    async def create_user(self, user: User) -> bool:
+        if self.is_postgres:
+            try:
+                async with self._pool.acquire() as conn:
+                    await conn.execute(
+                        "INSERT INTO users (username, password_hash, public_key, created_at, last_seen) VALUES ($1, $2, $3, $4, $5)",
+                        user.username, user.password_hash, user.public_key, user.created_at, user.last_seen
+                    )
+                logger.info(f"User created: {user.username}")
+                return True
+            except asyncpg.UniqueViolationError:
+                logger.warning(f"User already exists: {user.username}")
+                return False
+        else:
+            try:
+                await asyncio.to_thread(
+                    self._sqlite_execute,
                     "INSERT INTO users (username, password_hash, public_key, created_at, last_seen) VALUES (?, ?, ?, ?, ?)",
                     (user.username, user.password_hash, user.public_key, user.created_at, user.last_seen)
                 )
-            logger.info(f"User created: {user.username}")
-            return True
-        except sqlite3.IntegrityError:
-            logger.warning(f"User already exists: {user.username}")
-            return False
+                logger.info(f"User created: {user.username}")
+                return True
+            except Exception:
+                logger.warning(f"User already exists: {user.username}")
+                return False
     
-    def get_user(self, username: str) -> Optional[User]:
-        """Retrieve user by username"""
-        with sqlite3.connect(self.db_path) as conn:
-            conn.row_factory = sqlite3.Row
-            cursor = conn.execute(
-                "SELECT * FROM users WHERE username = ? AND is_active = 1",
-                (username,)
-            )
-            row = cursor.fetchone()
+    async def get_user(self, username: str) -> Optional[User]:
+        if self.is_postgres:
+            async with self._pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    "SELECT * FROM users WHERE username = $1 AND is_active = TRUE",
+                    username
+                )
+                if row:
+                    return User(
+                        username=row['username'],
+                        password_hash=row['password_hash'],
+                        public_key=row['public_key'],
+                        created_at=row['created_at'],
+                        last_seen=row['last_seen'],
+                        is_active=row['is_active'],
+                        decoy_pin=row['decoy_pin']
+                    )
+        else:
+            row = await asyncio.to_thread(self._sqlite_fetchone,
+                "SELECT * FROM users WHERE username = ? AND is_active = 1", (username,))
             if row:
                 return User(
                     username=row['username'],
@@ -206,141 +287,208 @@ class DatabaseManager:
                 )
         return None
     
-    def update_public_key(self, username: str, public_key: str):
-        """Update user's public key"""
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute(
-                "UPDATE users SET public_key = ? WHERE username = ?",
-                (public_key, username)
-            )
-    
-    def update_last_seen(self, username: str):
-        """Update user's last seen timestamp"""
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute(
-                "UPDATE users SET last_seen = ? WHERE username = ?",
-                (datetime.now().isoformat(), username)
-            )
-    
-    def save_message(self, message: Message) -> bool:
-        """Save a message to database"""
-        try:
-            with sqlite3.connect(self.db_path) as conn:
-                conn.execute(
-                    """INSERT INTO messages 
-                       (id, sender, recipient, content_encrypted, timestamp, status, self_destruct_seconds) 
-                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                    (message.id, message.sender, message.recipient, 
-                     message.content_encrypted, message.timestamp.isoformat(),
-                     message.status, message.self_destruct_seconds)
+    async def update_public_key(self, username: str, public_key: str):
+        if self.is_postgres:
+            async with self._pool.acquire() as conn:
+                await conn.execute(
+                    "UPDATE users SET public_key = $1 WHERE username = $2",
+                    public_key, username
                 )
-            return True
-        except Exception as e:
-            logger.error(f"Error saving message: {e}")
-            return False
+        else:
+            await asyncio.to_thread(self._sqlite_execute,
+                "UPDATE users SET public_key = ? WHERE username = ?", (public_key, username))
     
-    def update_message_status(self, message_id: str, status: str):
-        """Update message delivery/read status"""
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute(
-                "UPDATE messages SET status = ? WHERE id = ?",
-                (status, message_id)
-            )
+    async def update_last_seen(self, username: str):
+        now = datetime.now().isoformat()
+        if self.is_postgres:
+            async with self._pool.acquire() as conn:
+                await conn.execute(
+                    "UPDATE users SET last_seen = $1 WHERE username = $2",
+                    now, username
+                )
+        else:
+            await asyncio.to_thread(self._sqlite_execute,
+                "UPDATE users SET last_seen = ? WHERE username = ?", (now, username))
     
-    def delete_message(self, message_id: str):
-        """Soft delete a message"""
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute(
-                "UPDATE messages SET deleted_at = ? WHERE id = ?",
-                (datetime.now().isoformat(), message_id)
-            )
+    async def update_password(self, username: str, new_password_hash: str):
+        if self.is_postgres:
+            async with self._pool.acquire() as conn:
+                await conn.execute(
+                    "UPDATE users SET password_hash = $1 WHERE username = $2",
+                    new_password_hash, username
+                )
+        else:
+            await asyncio.to_thread(self._sqlite_execute,
+                "UPDATE users SET password_hash = ? WHERE username = ?", (new_password_hash, username))
     
-    def get_undelivered_messages(self, username: str) -> list:
-        """Get undelivered messages for a user"""
-        with sqlite3.connect(self.db_path) as conn:
-            conn.row_factory = sqlite3.Row
-            cursor = conn.execute(
-                """SELECT * FROM messages 
-                   WHERE recipient = ? AND status IN ('sent', 'delivered') 
-                   AND deleted_at IS NULL
-                   ORDER BY timestamp ASC""",
-                (username,)
-            )
-            return [dict(row) for row in cursor.fetchall()]
+    async def delete_user(self, username: str):
+        if self.is_postgres:
+            async with self._pool.acquire() as conn:
+                await conn.execute("DELETE FROM messages WHERE sender = $1 OR recipient = $1", username)
+                await conn.execute("DELETE FROM sessions WHERE username = $1", username)
+                await conn.execute("DELETE FROM active_connections WHERE username = $1", username)
+                await conn.execute("DELETE FROM users WHERE username = $1", username)
+        else:
+            await asyncio.to_thread(self._sqlite_execute,
+                "DELETE FROM messages WHERE sender = ? OR recipient = ?", (username, username))
+            await asyncio.to_thread(self._sqlite_execute,
+                "DELETE FROM sessions WHERE username = ?", (username,))
+            await asyncio.to_thread(self._sqlite_execute,
+                "DELETE FROM active_connections WHERE username = ?", (username,))
+            await asyncio.to_thread(self._sqlite_execute,
+                "DELETE FROM users WHERE username = ?", (username,))
     
-    def create_session(self, session: Session) -> bool:
-        """Create a new session"""
+    # ---- Session operations ----
+    
+    async def create_session(self, session: Session) -> bool:
         try:
-            with sqlite3.connect(self.db_path) as conn:
-                conn.execute(
+            if self.is_postgres:
+                async with self._pool.acquire() as conn:
+                    await conn.execute(
+                        "INSERT INTO sessions (token, username, created_at, expires_at, ip_address) VALUES ($1, $2, $3, $4, $5)",
+                        session.token, session.username, session.created_at, session.expires_at, session.ip_address
+                    )
+            else:
+                await asyncio.to_thread(self._sqlite_execute,
                     "INSERT INTO sessions (token, username, created_at, expires_at, ip_address) VALUES (?, ?, ?, ?, ?)",
-                    (session.token, session.username, session.created_at.isoformat(),
-                     session.expires_at.isoformat(), session.ip_address)
-                )
+                    (session.token, session.username, session.created_at.isoformat(), session.expires_at.isoformat(), session.ip_address))
             return True
         except Exception as e:
             logger.error(f"Error creating session: {e}")
             return False
     
-    def validate_session(self, token: str) -> Optional[str]:
-        """Validate session token and return username"""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.execute(
-                "SELECT username, expires_at FROM sessions WHERE token = ?",
-                (token,)
-            )
-            row = cursor.fetchone()
+    async def validate_session(self, token: str) -> Optional[str]:
+        if self.is_postgres:
+            async with self._pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    "SELECT username, expires_at FROM sessions WHERE token = $1", token
+                )
+                if row and row['expires_at'] > datetime.now():
+                    return row['username']
+        else:
+            row = await asyncio.to_thread(self._sqlite_fetchone,
+                "SELECT username, expires_at FROM sessions WHERE token = ?", (token,))
             if row:
                 expires_at = datetime.fromisoformat(row[1])
                 if expires_at > datetime.now():
                     return row[0]
         return None
     
-    def delete_session(self, token: str):
-        """Delete a session (logout)"""
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
+    async def delete_session(self, token: str):
+        if self.is_postgres:
+            async with self._pool.acquire() as conn:
+                await conn.execute("DELETE FROM sessions WHERE token = $1", token)
+        else:
+            await asyncio.to_thread(self._sqlite_execute,
+                "DELETE FROM sessions WHERE token = ?", (token,))
     
-    def cleanup_expired_sessions(self):
-        """Remove expired sessions"""
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute(
-                "DELETE FROM sessions WHERE expires_at < ?",
-                (datetime.now().isoformat(),)
-            )
+    async def cleanup_expired_sessions(self):
+        now = datetime.now().isoformat()
+        if self.is_postgres:
+            async with self._pool.acquire() as conn:
+                await conn.execute(
+                    "DELETE FROM sessions WHERE expires_at < $1",
+                    datetime.now()
+                )
+        else:
+            await asyncio.to_thread(self._sqlite_execute,
+                "DELETE FROM sessions WHERE expires_at < ?", (now,))
     
-    def set_decoy_pin(self, username: str, pin: str):
-        """Set decoy mode PIN for a user"""
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute(
-                "UPDATE users SET decoy_pin = ? WHERE username = ?",
-                (hashlib.sha256(pin.encode()).hexdigest(), username)
-            )
+    # ---- Message operations ----
     
-    def delete_user(self, username: str):
-        """Delete user and all associated data"""
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute("DELETE FROM messages WHERE sender = ? OR recipient = ?", (username, username))
-            conn.execute("DELETE FROM sessions WHERE username = ?", (username,))
-            conn.execute("DELETE FROM active_connections WHERE username = ?", (username,))
-            conn.execute("DELETE FROM users WHERE username = ?", (username,))
+    async def save_message(self, message: Message) -> bool:
+        try:
+            if self.is_postgres:
+                async with self._pool.acquire() as conn:
+                    await conn.execute(
+                        """INSERT INTO messages 
+                           (id, sender, recipient, content_encrypted, timestamp, status, self_destruct_seconds) 
+                           VALUES ($1, $2, $3, $4, $5, $6, $7)""",
+                        message.id, message.sender, message.recipient,
+                        message.content_encrypted, message.timestamp,
+                        message.status, message.self_destruct_seconds
+                    )
+            else:
+                await asyncio.to_thread(self._sqlite_execute,
+                    """INSERT INTO messages 
+                       (id, sender, recipient, content_encrypted, timestamp, status, self_destruct_seconds) 
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (message.id, message.sender, message.recipient,
+                     message.content_encrypted, message.timestamp.isoformat(),
+                     message.status, message.self_destruct_seconds))
+            return True
+        except Exception as e:
+            logger.error(f"Error saving message: {e}")
+            return False
     
-    def update_password(self, username: str, new_password_hash: str):
-        """Update user's password hash"""
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute(
-                "UPDATE users SET password_hash = ? WHERE username = ?",
-                (new_password_hash, username)
-            )
+    async def update_message_status(self, message_id: str, status: str):
+        if self.is_postgres:
+            async with self._pool.acquire() as conn:
+                await conn.execute(
+                    "UPDATE messages SET status = $1 WHERE id = $2",
+                    status, message_id
+                )
+        else:
+            await asyncio.to_thread(self._sqlite_execute,
+                "UPDATE messages SET status = ? WHERE id = ?", (status, message_id))
     
-    def verify_decoy_pin(self, username: str, pin: str) -> bool:
-        """Verify decoy mode PIN"""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.execute(
-                "SELECT decoy_pin FROM users WHERE username = ?",
-                (username,)
-            )
-            row = cursor.fetchone()
+    async def delete_message(self, message_id: str):
+        now = datetime.now().isoformat()
+        if self.is_postgres:
+            async with self._pool.acquire() as conn:
+                await conn.execute(
+                    "UPDATE messages SET deleted_at = $1 WHERE id = $2",
+                    datetime.now(), message_id
+                )
+        else:
+            await asyncio.to_thread(self._sqlite_execute,
+                "UPDATE messages SET deleted_at = ? WHERE id = ?", (now, message_id))
+    
+    async def get_undelivered_messages(self, username: str) -> list:
+        if self.is_postgres:
+            async with self._pool.acquire() as conn:
+                rows = await conn.fetch(
+                    """SELECT * FROM messages 
+                       WHERE recipient = $1 AND status IN ('sent', 'delivered') 
+                       AND deleted_at IS NULL
+                       ORDER BY timestamp ASC""",
+                    username
+                )
+                return [dict(r) for r in rows]
+        else:
+            rows = await asyncio.to_thread(self._sqlite_fetchall,
+                """SELECT * FROM messages 
+                   WHERE recipient = ? AND status IN ('sent', 'delivered') 
+                   AND deleted_at IS NULL
+                   ORDER BY timestamp ASC""",
+                (username,))
+            return [dict(r) for r in rows]
+    
+    # ---- Decoy PIN ----
+    
+    async def set_decoy_pin(self, username: str, pin: str):
+        hashed = hashlib.sha256(pin.encode()).hexdigest()
+        if self.is_postgres:
+            async with self._pool.acquire() as conn:
+                await conn.execute(
+                    "UPDATE users SET decoy_pin = $1 WHERE username = $2",
+                    hashed, username
+                )
+        else:
+            await asyncio.to_thread(self._sqlite_execute,
+                "UPDATE users SET decoy_pin = ? WHERE username = ?", (hashed, username))
+    
+    async def verify_decoy_pin(self, username: str, pin: str) -> bool:
+        if self.is_postgres:
+            async with self._pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    "SELECT decoy_pin FROM users WHERE username = $1", username
+                )
+                if row and row['decoy_pin']:
+                    return row['decoy_pin'] == hashlib.sha256(pin.encode()).hexdigest()
+        else:
+            row = await asyncio.to_thread(self._sqlite_fetchone,
+                "SELECT decoy_pin FROM users WHERE username = ?", (username,))
             if row and row[0]:
                 return row[0] == hashlib.sha256(pin.encode()).hexdigest()
         return False
@@ -397,7 +545,7 @@ class AuthManager:
             return {'success': False, 'error': 'Password must be at least 6 characters'}
         
         # Check if user exists
-        if self.db.get_user(username):
+        if await self.db.get_user(username):
             return {'success': False, 'error': 'Username already exists'}
         
         # Create user
@@ -409,7 +557,7 @@ class AuthManager:
             last_seen=datetime.now()
         )
         
-        if self.db.create_user(user):
+        if await self.db.create_user(user):
             token = self.generate_token(username, "")
             session = Session(
                 token=token,
@@ -418,14 +566,14 @@ class AuthManager:
                 expires_at=datetime.now() + timedelta(hours=Config.JWT_EXPIRY_HOURS),
                 ip_address=""
             )
-            self.db.create_session(session)
+            await self.db.create_session(session)
             return {'success': True, 'token': token, 'username': username}
         
         return {'success': False, 'error': 'Registration failed'}
     
     async def login_user(self, username: str, password: str) -> dict:
         """Login existing user"""
-        user = self.db.get_user(username)
+        user = await self.db.get_user(username)
         if not user:
             return {'success': False, 'error': 'User not found'}
         
@@ -441,7 +589,7 @@ class AuthManager:
             expires_at=datetime.now() + timedelta(hours=Config.JWT_EXPIRY_HOURS),
             ip_address=""
         )
-        self.db.create_session(session)
+        await self.db.create_session(session)
         
         return {
             'success': True, 
@@ -455,12 +603,12 @@ class AuthManager:
         username = self.verify_token(token)
         if not username:
             return {'success': False, 'error': 'Invalid or expired token'}
-        user = self.db.get_user(username)
+        user = await self.db.get_user(username)
         if not user:
             return {'success': False, 'error': 'User not found'}
         if not self.verify_password(password, user.password_hash):
             return {'success': False, 'error': 'Invalid password'}
-        self.db.delete_user(username)
+        await self.db.delete_user(username)
         return {'success': True}
     
     async def reset_password(self, token: str, old_password: str, new_password: str) -> dict:
@@ -468,7 +616,7 @@ class AuthManager:
         username = self.verify_token(token)
         if not username:
             return {'success': False, 'error': 'Invalid or expired token'}
-        user = self.db.get_user(username)
+        user = await self.db.get_user(username)
         if not user:
             return {'success': False, 'error': 'User not found'}
         if not self.verify_password(old_password, user.password_hash):
@@ -476,7 +624,7 @@ class AuthManager:
         if len(new_password) < 6:
             return {'success': False, 'error': 'New password must be at least 6 characters'}
         new_hash = self.hash_password(new_password)
-        self.db.update_password(username, new_hash)
+        await self.db.update_password(username, new_hash)
         return {'success': True}
 
 
@@ -503,7 +651,7 @@ class MessageProcessor:
     
     async def process_undelivered_messages(self, username: str, websocket):
         """Send undelivered messages to user"""
-        messages = self.db.get_undelivered_messages(username)
+        messages = await self.db.get_undelivered_messages(username)
         for msg in messages:
             try:
                 await websocket.send(json.dumps({
@@ -515,7 +663,7 @@ class MessageProcessor:
                     'self_destruct': msg['self_destruct_seconds']
                 }))
                 # Update status to delivered
-                self.db.update_message_status(msg['id'], 'delivered')
+                await self.db.update_message_status(msg['id'], 'delivered')
             except Exception as e:
                 logger.error(f"Error sending undelivered message: {e}")
 
@@ -690,7 +838,7 @@ class WebSocketServer:
             return
         
         # Verify session — try DB first, fall back to JWT
-        stored_username = self.db.validate_session(token)
+        stored_username = await self.db.validate_session(token)
         if not stored_username:
             stored_username = self.auth_manager.verify_token(token)
         if not stored_username or stored_username != username:
@@ -706,7 +854,7 @@ class WebSocketServer:
         # Add connection
         self.connections[username] = websocket
         self.ip_connections[client_ip] = self.ip_connections.get(client_ip, 0) + 1
-        self.db.update_last_seen(username)
+        await self.db.update_last_seen(username)
         
         logger.info(f"User connected: {username} from {client_ip}")
         
@@ -771,7 +919,7 @@ class WebSocketServer:
         
         # Save message to database
         message = self.message_processor.create_message(sender, recipient, content, self_destruct)
-        self.db.save_message(message)
+        await self.db.save_message(message)
         
         # Send to recipient if online
         if recipient in self.connections:
@@ -785,7 +933,7 @@ class WebSocketServer:
                     'self_destruct': self_destruct
                 }))
                 # Update status to delivered
-                self.db.update_message_status(message.id, 'delivered')
+                await self.db.update_message_status(message.id, 'delivered')
                 
                 # Send delivery receipt to sender
                 if sender in self.connections:
@@ -823,13 +971,13 @@ class WebSocketServer:
         """Handle delivery receipt"""
         message_id = data.get('messageId')
         if message_id:
-            self.db.update_message_status(message_id, 'delivered')
+            await self.db.update_message_status(message_id, 'delivered')
     
     async def handle_read_receipt(self, data: dict):
         """Handle read receipt"""
         message_id = data.get('messageId')
         if message_id:
-            self.db.update_message_status(message_id, 'read')
+            await self.db.update_message_status(message_id, 'read')
             
             # Forward read receipt to sender
             # (You'd need to know who the sender is from the message)
@@ -894,7 +1042,7 @@ class WebSocketServer:
 
 class JustUsServer:
     def __init__(self):
-        self.db = DatabaseManager(Config.DATABASE_PATH)
+        self.db = DatabaseManager(Config.DATABASE_URL if Config.DATABASE_URL else Config.DATABASE_PATH)
         self.auth_manager = AuthManager(self.db)
         self.message_processor = MessageProcessor(self.db)
         self.ws_server = WebSocketServer(self.auth_manager, self.db, self.message_processor)
@@ -906,14 +1054,16 @@ class JustUsServer:
         self.scheduler.add_job(
             self.db.cleanup_expired_sessions,
             'interval',
-            hours=1
+            hours=1,
+            id='cleanup_sessions'
         )
         
         # Clean typing indicators
         self.scheduler.add_job(
             self.ws_server.cleanup_typing_indicators,
             'interval',
-            seconds=10
+            seconds=10,
+            id='cleanup_typing'
         )
         
         self.scheduler.start()
@@ -932,6 +1082,7 @@ class JustUsServer:
     async def run(self):
         """Start server"""
         logger.info("Starting JustUs Secret Chat Server...")
+        await self.db.init_db()
         await self.cleanup_tasks()
         try:
             await self.start_server()
