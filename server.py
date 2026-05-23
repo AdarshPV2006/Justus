@@ -370,6 +370,7 @@ class AuthManager:
             'username': username,
             'exp': datetime.utcnow() + timedelta(hours=Config.JWT_EXPIRY_HOURS),
             'iat': datetime.utcnow(),
+            'jti': secrets.token_hex(8),
             'ip': ip_address
         }
         return jwt.encode(payload, Config.JWT_SECRET, algorithm=Config.JWT_ALGORITHM)
@@ -688,8 +689,10 @@ class WebSocketServer:
             await websocket.close(1008, "Authentication required")
             return
         
-        # Verify session
+        # Verify session — try DB first, fall back to JWT
         stored_username = self.db.validate_session(token)
+        if not stored_username:
+            stored_username = self.auth_manager.verify_token(token)
         if not stored_username or stored_username != username:
             await websocket.close(1008, "Invalid session")
             return
