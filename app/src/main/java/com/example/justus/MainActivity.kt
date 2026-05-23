@@ -161,6 +161,7 @@ class EncryptionManager {
     }
 
     fun decryptMessage(encryptedMessage: String): String {
+        if (symmetricKey == null) return encryptedMessage
         return try {
             val decoded = Base64.getDecoder().decode(encryptedMessage)
             val iv = decoded.copyOfRange(0, 12)
@@ -169,7 +170,7 @@ class EncryptionManager {
             cipher.init(Cipher.DECRYPT_MODE, symmetricKey, GCMParameterSpec(128, iv))
             String(cipher.doFinal(encrypted))
         } catch (e: Exception) {
-            "[Encrypted Message]"
+            encryptedMessage
         }
     }
 }
@@ -182,7 +183,8 @@ class WebSocketManager(
     private val onMessage: (String, String) -> Unit,
     private val onTyping: (String, Boolean) -> Unit,
     private val onStatusUpdate: (String, MessageStatus) -> Unit,
-    private val onConnectionChange: (ConnectionState) -> Unit
+    private val onConnectionChange: (ConnectionState) -> Unit,
+    private val onKeyExchange: (String, ByteArray) -> Unit
 ) {
     private var webSocket: WebSocket? = null
     private val client = OkHttpClient.Builder()
@@ -192,12 +194,14 @@ class WebSocketManager(
     private var currentUser = ""
     private var sessionToken = ""
     private var serverUrl = ""
+    private var publicKeyBase64 = ""
     private var isReconnecting = false
 
-    fun connect(username: String, token: String, url: String) {
+    fun connect(username: String, token: String, url: String, pubKey: String = "") {
         currentUser = username
         sessionToken = token
         serverUrl = url
+        publicKeyBase64 = pubKey
         val request = Request.Builder()
             .url("$url/ws?token=$token&user=$username")
             .build()
@@ -206,6 +210,15 @@ class WebSocketManager(
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 onConnectionChange(ConnectionState.CONNECTED)
                 isReconnecting = false
+                // Broadcast public key for key exchange
+                if (publicKeyBase64.isNotEmpty()) {
+                    val keyMsg = JSONObject().apply {
+                        put("type", "key_exchange")
+                        put("sender", currentUser)
+                        put("publicKey", publicKeyBase64)
+                    }
+                    webSocket.send(keyMsg.toString())
+                }
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
@@ -233,6 +246,12 @@ class WebSocketManager(
                             onStatusUpdate(messageId, MessageStatus.READ)
                         }
                     }
+                    "key_exchange" -> {
+                        val sender = json.getString("sender")
+                        val pubKeyB64 = json.getString("publicKey")
+                        val pubKeyBytes = Base64.getDecoder().decode(pubKeyB64)
+                        onKeyExchange(sender, pubKeyBytes)
+                    }
                 }
             }
 
@@ -253,7 +272,7 @@ class WebSocketManager(
             isReconnecting = true
             onConnectionChange(ConnectionState.RECONNECTING)
             Handler(Looper.getMainLooper()).postDelayed({
-                connect(currentUser, sessionToken, serverUrl)
+                connect(currentUser, sessionToken, serverUrl, publicKeyBase64)
             }, 3000)
         }
     }
@@ -414,12 +433,16 @@ class MainActivity : AppCompatActivity() {
             },
             onConnectionChange = { state ->
                 connState = state
+            },
+            onKeyExchange = { sender, pubKeyBytes ->
+                encryptionManager.performKeyExchange(pubKeyBytes)
             }
         )
 
-        webSocketManager?.connect(username, token, url)
         encryptionManager = EncryptionManager()
         val publicKeyBytes = encryptionManager.getPublicKeyBytes()
+        val pubKeyB64 = if (publicKeyBytes != null) Base64.getEncoder().encodeToString(publicKeyBytes) else ""
+        webSocketManager?.connect(username, token, url, pubKeyB64)
     }
 
     private fun sendMessage(text: String, recipient: String, selfDestructSeconds: Int) {
